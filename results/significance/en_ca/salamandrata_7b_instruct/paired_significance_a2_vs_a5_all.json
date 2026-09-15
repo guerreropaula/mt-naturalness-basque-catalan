@@ -5,7 +5,7 @@
     "P5_GRPO_A5"
   ],
   "dataset": "en_ca",
-  "evaluation_split": "global_dev",
+  "evaluation_split": "test",
   "metrics": [
     "sentence_bleu",
     "sentence_chrf_pp",

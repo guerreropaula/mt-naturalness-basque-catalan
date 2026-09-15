@@ -57,22 +57,20 @@ def load_experiment_split(
 ) -> pd.DataFrame:
     """Load the canonical split for experiments.
 
-    Development and final evaluation should use the deduplicated global eval
-    files created by the training-split builder. If those files are absent
-    (for tests, smoke data, or freshly preprocessed corpora), fall back to the
-    processed split. Training split construction must keep using
+    The in-domain evaluation uses the deduplicated test file created by the
+    training-split builder. If that file is absent (for smoke data or freshly
+    preprocessed corpora), fall back to the processed test split. Training split construction must keep using
     ``load_processed_split`` directly.
     """
-    global_split = {"dev": "global_dev", "test": "global_test"}.get(split)
-    if global_split is not None:
+    if split == "test":
         eval_dir = Path(training_dir) / dataset_key / "eval"
-        eval_jsonl = eval_dir / f"{global_split}.jsonl"
-        eval_parquet = eval_dir / f"{global_split}.parquet"
+        eval_jsonl = eval_dir / "test.jsonl"
+        eval_parquet = eval_dir / "test.parquet"
         if eval_jsonl.exists() or eval_parquet.exists():
             return _load_jsonl_or_parquet(
                 eval_jsonl,
                 eval_parquet,
-                f"global evaluation split '{global_split}' for dataset '{dataset_key}'",
+                f"in-domain test split for dataset '{dataset_key}'",
             )
     return load_processed_split(dataset_key, split, processed_dir)
 

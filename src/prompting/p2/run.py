@@ -19,7 +19,7 @@ from src.prompting._shared import (
     load_experiment_split as load_processed_split,
     resolve_generation_profile,
 )
-from src.data.preprocessing import _load_fasttext_model, _predict_language
+from src.data.preprocessing import load_fasttext_model, predict_language
 from src.utils.config import (
     get_dataset_entry,
     get_experiment_entry,
@@ -69,7 +69,7 @@ def _normalized_for_marker_check(text: str) -> str:
     return ascii_text.translate(str.maketrans("", "", "'.,:;!?"))
 
 
-def _validate_refinement_prediction(
+def validate_refinement_prediction(
     raw_prediction: str,
     draft_prediction: str,
     target_lang: str,
@@ -101,20 +101,20 @@ def _validate_refinement_prediction(
         return draft_prediction, False, "too_long"
 
     if language_model is not None and candidate_tokens >= 5:
-        predicted_lang, confidence = _predict_language(language_model, candidate)
+        predicted_lang, confidence = predict_language(language_model, candidate)
         if predicted_lang != target_lang and confidence >= language_confidence_threshold:
             return draft_prediction, False, "wrong_language"
 
     return candidate, True, None
 
 
-def _load_p2_language_model(preprocessing_config_path: str | Path) -> tuple[Any | None, float]:
+def load_p2_language_model(preprocessing_config_path: str | Path) -> tuple[Any | None, float]:
     """Load fastText once for refinement validation without blocking P2 if unavailable."""
     try:
         config = load_preprocessing_config(preprocessing_config_path)
         language_config = config["language_id"]
         return (
-            _load_fasttext_model(str(language_config["model_path"])),
+            load_fasttext_model(str(language_config["model_path"])),
             float(language_config["confidence_threshold"]),
         )
     except Exception as exc:  # pragma: no cover - environment-dependent optional safeguard
@@ -150,8 +150,8 @@ def run_self_polishing_experiment(
     generation_config_path: str | Path = "configs/generation.yaml",
     preprocessing_config_path: str | Path = "configs/preprocessing.yaml",
     processed_dir: str | Path = "data/processed",
-    results_dir: str | Path = "results/experiments",
-    split: str = "dev",
+    results_dir: str | Path = "results/p0_p3",
+    split: str = "test",
     limit: int | None = None,
     force: bool = False,
 ) -> dict[str, Any]:
@@ -176,7 +176,7 @@ def run_self_polishing_experiment(
     )
     initial_prompt = dict(experiment_entry["initial_prompt"])
     refinement_prompt = dict(experiment_entry["refinement_prompt"])
-    language_model, language_confidence_threshold = _load_p2_language_model(
+    language_model, language_confidence_threshold = load_p2_language_model(
         preprocessing_config_path
     )
 
@@ -252,7 +252,7 @@ def run_self_polishing_experiment(
             refinement_generation_config,
         )
         validated_predictions = [
-            _validate_refinement_prediction(
+            validate_refinement_prediction(
                 raw_prediction,
                 draft_prediction,
                 target_lang=str(dataset_entry["target_lang"]),
@@ -382,8 +382,8 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--generation-config", default="configs/generation.yaml")
     parser.add_argument("--preprocessing-config", default="configs/preprocessing.yaml")
     parser.add_argument("--processed-dir", default="data/processed")
-    parser.add_argument("--results-dir", default="results/experiments")
-    parser.add_argument("--split", default="test", choices=["train", "dev", "test"])
+    parser.add_argument("--results-dir", default="results/p0_p3")
+    parser.add_argument("--split", default="test", choices=["test"])
     parser.add_argument("--limit", type=int, default=None)
     parser.add_argument("--force", action="store_true")
     parser.add_argument(

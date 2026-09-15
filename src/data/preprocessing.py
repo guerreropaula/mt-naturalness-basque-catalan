@@ -22,7 +22,7 @@ class LanguageIdError(RuntimeError):
     """Raised when the configured fastText language-ID model is unavailable."""
 
 
-def _load_fasttext_model(model_path: str):
+def load_fasttext_model(model_path: str):
     try:
         import fasttext
     except ImportError as exc:  # pragma: no cover - depends on environment
@@ -36,7 +36,7 @@ def _load_fasttext_model(model_path: str):
     return fasttext.load_model(str(path))
 
 
-def _predict_language(model: Any, text: str) -> tuple[str, float]:
+def predict_language(model: Any, text: str) -> tuple[str, float]:
     labels, scores = model.predict(text.replace("\n", " "), k=1)
     return labels[0].replace("__label__", ""), float(scores[0])
 
@@ -53,7 +53,7 @@ def _domain_filter_active(
     return True, domain_config
 
 
-def _basic_text_reason(text: str, config: dict[str, Any], side: str) -> str | None:
+def basic_text_rejection_reason(text: str, config: dict[str, Any], side: str) -> str | None:
     if not text:
         return f"{side}_empty"
     if len(text) < int(config["min_chars"]):
@@ -67,7 +67,7 @@ def _basic_text_reason(text: str, config: dict[str, Any], side: str) -> str | No
     return None
 
 
-def _length_reason(source: str, target: str, config: dict[str, Any]) -> str | None:
+def length_rejection_reason(source: str, target: str, config: dict[str, Any]) -> str | None:
     source_tokens = max(len(source.split()), 1)
     target_tokens = max(len(target.split()), 1)
     min_tokens = int(config.get("min_tokens", 1))
@@ -112,13 +112,12 @@ def preprocess_loaded_dataframe(
         for key in (
             "train_size",
             "test_size",
-            "dev_size",
             "lfp_background_size",
             "evaluation_reserve_size",
         )
     )
     lid_config = preprocessing_config["language_id"]
-    language_model = _load_fasttext_model(str(lid_config["model_path"]))
+    language_model = load_fasttext_model(str(lid_config["model_path"]))
     threshold = float(lid_config["confidence_threshold"])
     normalization = preprocessing_config["normalization"]
     text_filtering = preprocessing_config["text_filtering"]
@@ -153,17 +152,17 @@ def preprocess_loaded_dataframe(
         reason = None
         if domain_active and str(metadata.get(domain_column, "")) not in allowed_domains:
             reason = "domain_not_allowed"
-        reason = reason or _basic_text_reason(source, text_filtering, "source")
-        reason = reason or _basic_text_reason(target, text_filtering, "target")
+        reason = reason or basic_text_rejection_reason(source, text_filtering, "source")
+        reason = reason or basic_text_rejection_reason(target, text_filtering, "target")
         if reason is None:
-            source_lang, source_score = _predict_language(language_model, source)
-            target_lang, target_score = _predict_language(language_model, target)
+            source_lang, source_score = predict_language(language_model, source)
+            target_lang, target_score = predict_language(language_model, target)
             if source_lang != dataset_config["source_lang"] or source_score < threshold:
                 reason = "source_language_mismatch"
             elif target_lang != dataset_config["target_lang"] or target_score < threshold:
                 reason = "target_language_mismatch"
         if reason is None:
-            reason = _length_reason(source, target, length_filtering)
+            reason = length_rejection_reason(source, target, length_filtering)
 
         if reason is None:
             pair = (source, target)
@@ -201,7 +200,6 @@ def preprocess_loaded_dataframe(
         "split_sizes": {
             "train": int(split_config["train_size"]),
             "test": int(split_config["test_size"]),
-            "dev": int(split_config["dev_size"]),
             "lfp_background": int(split_config.get("lfp_background_size", 0)),
             "evaluation_reserve": int(split_config.get("evaluation_reserve_size", 0)),
         },
@@ -227,7 +225,7 @@ def preprocess_loaded_dataframe(
         raise ValueError(
             "Only "
             f"{valid_rows} valid rows found; {requested_rows} are required for "
-            "train/test/dev/LFP background."
+            "train/test/LFP background."
         )
     return result
 
@@ -245,16 +243,14 @@ def _ordered_splits(
     ].copy()
     train_end = int(split_config["train_size"])
     test_end = train_end + int(split_config["test_size"])
-    dev_end = test_end + int(split_config["dev_size"])
-    background_end = dev_end + int(split_config.get("lfp_background_size", 0))
+    background_end = test_end + int(split_config.get("lfp_background_size", 0))
     reserve_end = background_end + int(split_config.get("evaluation_reserve_size", 0))
     splits = {
         "train": valid.iloc[:train_end],
         "test": valid.iloc[train_end:test_end],
-        "dev": valid.iloc[test_end:dev_end],
     }
     if int(split_config.get("lfp_background_size", 0)):
-        splits["lfp_background"] = valid.iloc[dev_end:background_end]
+        splits["lfp_background"] = valid.iloc[test_end:background_end]
     if int(split_config.get("evaluation_reserve_size", 0)):
         splits["evaluation_reserve"] = valid.iloc[background_end:reserve_end]
     return splits
@@ -271,7 +267,6 @@ def persist_preprocessed_outputs(
     output_dir = Path(preprocessing_config["output"]["processed_dir"]) / dataset_key
     paths = {
         "train": output_dir / "train.jsonl",
-        "dev": output_dir / "dev.jsonl",
         "test": output_dir / "test.jsonl",
         "lfp_background": output_dir / "lfp_background.jsonl",
         "evaluation_reserve": output_dir / "evaluation_reserve.jsonl",

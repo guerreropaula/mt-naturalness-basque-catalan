@@ -97,7 +97,7 @@ def _load_tokenizer(model_name: str) -> Any:
     return tokenizer
 
 
-def _load_base_model(model_name: str, load_in_4bit: bool, training: bool) -> Any:
+def load_base_model(model_name: str, load_in_4bit: bool, training: bool) -> Any:
     kwargs: dict[str, Any] = {"token": get_hf_token()}
     if torch.cuda.is_available():
         kwargs["torch_dtype"] = torch.bfloat16 if torch.cuda.is_bf16_supported() else torch.float16
@@ -160,7 +160,7 @@ def train_contrastive_lm(
 
     tokenizer = _load_tokenizer(model_name)
     model = _prepare_lora_model(
-        _load_base_model(model_name, bool(config["model"]["load_in_4bit"]), training=True), config
+        load_base_model(model_name, bool(config["model"]["load_in_4bit"]), training=True), config
     )
     train_dataset = CausalTextDataset(train_texts, tokenizer, int(config["model"]["max_length"]))
     dev_dataset = CausalTextDataset(dev_texts, tokenizer, int(config["model"]["max_length"]))

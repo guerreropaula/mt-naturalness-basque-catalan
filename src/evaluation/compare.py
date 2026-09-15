@@ -183,7 +183,6 @@ def _interpretation(metric_key: str) -> str:
         "comet",
         "xcomet",
         "cometkiwi",
-        "comet_qe",
         "ttr",
         "mtld",
         "yules_i",
@@ -232,7 +231,7 @@ def _is_planned_experiment(
     experiment_label: str,
 ) -> bool:
     """Return whether a missing result is part of the planned experiment matrix."""
-    if split == "global_dev":
+    if split == "test":
         if experiment_label == "P0":
             return True
         if experiment_label in _PROMPTING_LABELS:
@@ -256,13 +255,6 @@ def _is_planned_experiment(
             "P5 GRPO A2", "P5 GRPO A3v2", "P5 GRPO A3v5"
         }
 
-    if split == "global_test":
-        selected_model = {
-            "en_eu": "latxa_8b_instruct",
-            "en_ca": "salamandrata_7b_instruct",
-        }.get(dataset)
-        return model == selected_model and experiment_label in _FINAL_TEST_LABELS
-
     return False
 
 
@@ -279,7 +271,7 @@ def build_comparison_eval(
     results_root: str | Path = "results",
     datasets: tuple[str, ...] = ("en_ca", "en_eu"),
     models: tuple[str, ...] | None = None,
-    split: str = "global_dev",
+    split: str = "test",
     output_dir: str | Path = "results/comparisons",
 ) -> tuple[Path, ...]:
     """Write one clean P0-P5 comparison CSV per language.
@@ -355,7 +347,7 @@ def main() -> None:
     parser.add_argument("--results-root", type=Path, default=Path("results"))
     parser.add_argument("--datasets", nargs="+", default=["en_ca", "en_eu"])
     parser.add_argument("--models", nargs="+", default=None)
-    parser.add_argument("--split", default="global_dev")
+    parser.add_argument("--split", default="test")
     parser.add_argument("--output-dir", type=Path, default=Path("results/comparisons"))
     args = parser.parse_args()
     outputs = build_comparison_eval(

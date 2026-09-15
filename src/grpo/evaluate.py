@@ -20,7 +20,7 @@ def evaluate_grpo_split(
     config_path: str | Path = "configs/grpo.yaml",
     sft_config_path: str | Path = "configs/sft.yaml",
     models_config_path: str | Path = "configs/models.yaml",
-    split: str = "global_dev",
+    split: str = "test",
     limit: int | None = None,
     evaluation_file: str | Path | None = None,
     output_dataset_key: str | None = None,
@@ -62,7 +62,7 @@ def main() -> None:
     parser.add_argument("--config", default="configs/grpo.yaml")
     parser.add_argument("--sft-config", default="configs/sft.yaml")
     parser.add_argument("--models-config", default="configs/models.yaml")
-    parser.add_argument("--split", default="global_dev", help="Canonical split label, or a label for --evaluation-file.")
+    parser.add_argument("--split", default="test", help="Canonical split label, or a label for --evaluation-file.")
     parser.add_argument("--limit", type=int, default=None)
     parser.add_argument("--evaluation-file", default=None, help="Immutable JSONL with id/source/target fields.")
     parser.add_argument("--output-dataset-key", default=None, help="Dataset label used only for result paths.")

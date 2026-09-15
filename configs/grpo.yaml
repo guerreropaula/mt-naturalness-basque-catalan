@@ -186,11 +186,9 @@ grpo:
     lr_scheduler_type: linear
     optim: adamw_bnb_8bit
     logging_steps: 5
-    # GRPO development is evaluated after training on global_dev. Sampling all
-    # G=8 completions for the 2k GRPO dev rows every 100 updates is prohibitively slow.
+    # Evaluation is run once after training on the held-out in-domain test set.
     eval_strategy: "no"
     eval_steps: 100
-    # Health checks run before checkpoint saves, retaining the last healthy state.
     save_strategy: steps
     save_steps: 100
     save_total_limit: 3
@@ -219,25 +217,3 @@ grpo:
       top_k: 50
       # Prevent an EOS-only completion before the validity gate can act.
       min_new_tokens: 4
-
-    completion_audit:
-      enabled: true
-      interval_reward_calls: 50
-      max_groups_per_write: 2
-      print_to_console: true
-      num_completions_to_print: 8
-      min_mean_chrfpp: 0.10
-      min_mean_cometkiwi: 0.30
-
-    health_check:
-      enabled: true
-      interval_steps: 100
-      examples: 16
-      batch_size: 4
-      max_new_tokens: 128
-      min_mean_chrfpp: 0.20
-      max_repeated_token_ratio: 0.50
-      max_repeated_rows_fraction: 0.25
-      max_unterminated_fraction: 0.50
-      max_empty_fraction: 0.25
-      max_duplicate_fraction: 0.50

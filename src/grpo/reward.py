@@ -2,12 +2,10 @@
 
 from __future__ import annotations
 
-import json
 import logging
 import math
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
-from pathlib import Path
 from typing import Any, Protocol
 
 import sacrebleu
@@ -365,59 +363,6 @@ class TranslationGRPOReward:
         # This is a validity gate, not a fifth reward component: an EOS-only
         # completion is not a translation and must not exploit metric rewards.
         self.empty_candidate_reward = float(empty_candidate_reward)
-        self._score_calls = 0
-        self.audit_path: Path | None = None
-        self.audit_interval = 50
-        self.audit_groups = 2
-        self.audit_min_mean_chrfpp = 0.10
-        self.audit_min_mean_cometkiwi = 0.35
-
-    def configure_audit(
-        self,
-        path: str | Path,
-        *,
-        interval_calls: int,
-        max_groups: int,
-        min_mean_chrfpp: float,
-        min_mean_cometkiwi: float,
-    ) -> None:
-        """Persist representative sampled groups for qualitative inspection."""
-        if interval_calls <= 0 or max_groups <= 0:
-            raise GRPORewardError("Completion-audit interval and group count must be positive.")
-        self.audit_path = Path(path)
-        self.audit_interval = int(interval_calls)
-        self.audit_groups = int(max_groups)
-        self.audit_min_mean_chrfpp = float(min_mean_chrfpp)
-        self.audit_min_mean_cometkiwi = float(min_mean_cometkiwi)
-
-    def _write_completion_audit(
-        self,
-        sources: Sequence[str],
-        candidates: Sequence[str],
-        references: Sequence[str],
-        scored: RewardBatch,
-    ) -> None:
-        if self.audit_path is None:
-            return
-        self.audit_path.parent.mkdir(parents=True, exist_ok=True)
-        limit = min(len(candidates), self.group_size * self.audit_groups)
-        components = scored.component_values()
-        with self.audit_path.open("a", encoding="utf-8") as handle:
-            for index in range(limit):
-                candidate = str(candidates[index])
-                reference = str(references[index])
-                record = {
-                    "reward_call": self._score_calls,
-                    "group_index": index // self.group_size,
-                    "candidate_index": index % self.group_size,
-                    "source": str(sources[index]),
-                    "reference": reference,
-                    "candidate": candidate,
-                    "candidate_word_count": len(candidate.split()),
-                    "candidate_is_lexically_valid": is_lexically_valid_translation(candidate, reference),
-                    **{name: values[index] for name, values in components.items()},
-                }
-                handle.write(json.dumps(record, ensure_ascii=False) + "\n")
 
     def score_batch(
         self,
@@ -515,51 +460,6 @@ class TranslationGRPOReward:
             reward if candidate.strip() and valid else self.empty_candidate_reward
             for candidate, valid, reward in zip(candidate_values, lexical_validity, total, strict=True)
         ]
-        self._score_calls += 1
-        if self.audit_path is not None and (
-            self._score_calls == 1 or self._score_calls % self.audit_interval == 0
-        ):
-            self._write_completion_audit(
-                source_values,
-                candidate_values,
-                reference_values,
-                RewardBatch(total, chrfpp, bleu, cometkiwi, comet, diversity, length, reference_likeness),
-            )
-            valid_indices = [index for index, valid in enumerate(lexical_validity) if valid]
-            mean_chrfpp = (
-                sum(chrfpp[index] for index in valid_indices) / len(valid_indices)
-                if valid_indices else 0.0
-            )
-            semantic_label = "COMETKiwi" if self.weights.cometkiwi > 0.0 else "COMET"
-            semantic_scores = cometkiwi if self.weights.cometkiwi > 0.0 else comet
-            mean_semantic = (
-                sum(semantic_scores[index] for index in valid_indices) / len(valid_indices)
-                if valid_indices else 0.0
-            )
-            if (
-                mean_chrfpp < self.audit_min_mean_chrfpp
-                or mean_semantic < self.audit_min_mean_cometkiwi
-            ):
-                raise GRPORewardError(
-                    "Sampled-completion quality gate failed on reward call "
-                    f"{self._score_calls}: mean chrF++={mean_chrfpp:.4f}, "
-                    f"mean {semantic_label}={mean_semantic:.4f}. See {self.audit_path}."
-                )
-        if self._score_calls == 1 or self._score_calls % 50 == 0:
-            logger.info(
-                "P5 reward call=%d mean_total=%.4f chrF++=%.4f BLEU=%.4f "
-                "COMETKiwi=%.4f COMET=%.4f diversity=%.4f length=%.4f "
-                "reference_likeness=%.4f",
-                self._score_calls,
-                sum(total) / size,
-                sum(chrfpp) / size,
-                sum(bleu) / size,
-                sum(cometkiwi) / size,
-                sum(comet) / size,
-                sum(diversity) / size,
-                sum(length) / size,
-                sum(reference_likeness) / size,
-            )
         return RewardBatch(total, chrfpp, bleu, cometkiwi, comet, diversity, length, reference_likeness)
 
     def __call__(

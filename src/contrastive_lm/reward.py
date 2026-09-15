@@ -9,7 +9,7 @@ from transformers import AutoTokenizer
 
 from src.contrastive_lm.data import load_labeled_texts
 from src.contrastive_lm.score import average_token_logprobs
-from src.contrastive_lm.train import _load_base_model
+from src.contrastive_lm.train import load_base_model
 from src.utils.config import load_contrastive_lm_config
 from src.utils.hf_auth import get_hf_token
 
@@ -74,7 +74,7 @@ class ContrastiveHTMTNaturalnessScorer:
         if self.tokenizer.pad_token_id is None:
             raise ContrastiveLMRewardError("Contrastive tokenizer must provide an EOS or PAD token.")
         self.tokenizer.padding_side = "right"
-        base_model = _load_base_model(
+        base_model = load_base_model(
             str(language["base_model"]), bool(model_config["load_in_4bit"]), training=False
         )
         self.model = PeftModel.from_pretrained(base_model, ht_adapter, adapter_name="ht")

@@ -1,4 +1,4 @@
-"""Create ordered SFT, GRPO, and global-evaluation splits from processed data."""
+"""Create ordered SFT, GRPO, and in-domain evaluation splits from processed data."""
 
 from __future__ import annotations
 
@@ -62,14 +62,12 @@ def _validate_columns(frame: pd.DataFrame, label: str) -> pd.DataFrame:
 
 def build_ordered_training_splits(
     train_frame: pd.DataFrame,
-    global_dev_frame: pd.DataFrame,
-    global_test_frame: pd.DataFrame,
+    test_frame: pd.DataFrame,
     sizes: TrainingSplitSizes = DEFAULT_SIZES,
 ) -> dict[str, pd.DataFrame]:
     """Partition the processed training file sequentially without shuffling."""
     train = _validate_columns(train_frame, "train")
-    global_dev = _validate_columns(global_dev_frame, "global_dev")
-    global_test = _validate_columns(global_test_frame, "global_test")
+    test = _validate_columns(test_frame, "test")
     if len(train) < sizes.required_train_rows:
         raise TrainingSplitError(
             f"Expected at least {sizes.required_train_rows} processed train rows, found {len(train)}."
@@ -83,8 +81,7 @@ def build_ordered_training_splits(
         "sft_dev": train.iloc[sizes.sft_train : sizes.sft_train + sizes.sft_dev].copy(),
         "grpo_train": train.iloc[sft_end:grpo_train_end].copy(),
         "grpo_dev": train.iloc[grpo_train_end:grpo_dev_end].copy(),
-        "global_dev": global_dev,
-        "global_test": global_test,
+        "test": test,
     }
     expected = {
         "sft_train": sizes.sft_train,
@@ -103,14 +100,12 @@ def deduplicate_training_splits(
 ) -> tuple[dict[str, pd.DataFrame], dict[str, Any]]:
     """Keep strict cross-split uniqueness while preserving each split's row order.
 
-    Global test has highest priority because it is the final held-out evaluation
-    set. Only collisions with an earlier split are removed; duplicates within a
+    The in-domain test set has highest priority because it is never used for training. Only collisions with an earlier split are removed; duplicates within a
     single split do not create cross-split leakage and remain in their original
     order.
     """
     priority = (
-        "global_test",
-        "global_dev",
+        "test",
         "sft_train",
         "sft_dev",
         "grpo_train",
@@ -161,8 +156,7 @@ def refill_deduplicated_splits(
     """Restore fixed split sizes from an ordered, disjoint preprocessing reserve."""
     reserve = _validate_columns(reserve_frame, "evaluation_reserve")
     priority = (
-        "global_test",
-        "global_dev",
+        "test",
         "sft_train",
         "sft_dev",
         "grpo_train",
@@ -222,7 +216,7 @@ def _split_keys(frame: pd.DataFrame) -> dict[str, set[Any]]:
 
 
 def validate_training_splits(splits: dict[str, pd.DataFrame]) -> dict[str, Any]:
-    """Check all SFT, GRPO, and global split combinations for leakage."""
+    """Check all SFT, GRPO, and in-domain test combinations for leakage."""
     keys = {name: _split_keys(frame) for name, frame in splits.items()}
     pairwise: dict[str, dict[str, int]] = {}
     for left, right in itertools.combinations(splits, 2):
@@ -265,15 +259,14 @@ def persist_training_splits(
     output_dir: str | Path = "data/training",
     force: bool = False,
 ) -> dict[str, str]:
-    """Persist training-only splits without mutating the processed global splits."""
+    """Persist the train/development splits and the in-domain test split."""
     root = Path(output_dir) / dataset_key
     paths = {
         "sft_train": root / "sft" / "train.jsonl",
         "sft_dev": root / "sft" / "dev.jsonl",
         "grpo_train": root / "grpo" / "train.jsonl",
         "grpo_dev": root / "grpo" / "dev.jsonl",
-        "global_dev": root / "eval" / "global_dev.jsonl",
-        "global_test": root / "eval" / "global_test.jsonl",
+        "test": root / "eval" / "test.jsonl",
     }
     if not force:
         existing = [path for path in paths.values() if path.exists()]
@@ -290,14 +283,13 @@ def prepare_training_splits(
     output_dir: str | Path = "data/training",
     force: bool = False,
 ) -> dict[str, str]:
-    """Construct train/dev-only SFT and GRPO splits without changing global evaluation data."""
+    """Construct SFT/GRPO train-dev splits and one held-out in-domain test set."""
     if dataset_key not in {"en_eu", "en_ca"}:
         raise TrainingSplitError(f"Unsupported dataset for training split preparation: {dataset_key}")
     train = load_processed_split(dataset_key, "train", processed_dir)
-    dev = load_processed_split(dataset_key, "dev", processed_dir)
     test = load_processed_split(dataset_key, "test", processed_dir)
     reserve = load_processed_split(dataset_key, "evaluation_reserve", processed_dir)
-    nominal_splits = build_ordered_training_splits(train, dev, test)
+    nominal_splits = build_ordered_training_splits(train, test)
     splits, deduplication = deduplicate_training_splits(nominal_splits)
     expected_sizes = {name: int(len(frame)) for name, frame in nominal_splits.items()}
     splits, reserve_refill = refill_deduplicated_splits(splits, reserve, expected_sizes)
@@ -309,7 +301,6 @@ def prepare_training_splits(
             "dataset_key": dataset_key,
             "source_files": {
                 "train": str(Path(processed_dir) / dataset_key / "train.jsonl"),
-                "dev": str(Path(processed_dir) / dataset_key / "dev.jsonl"),
                 "test": str(Path(processed_dir) / dataset_key / "test.jsonl"),
                 "evaluation_reserve": str(Path(processed_dir) / dataset_key / "evaluation_reserve.jsonl"),
             },
@@ -317,13 +308,12 @@ def prepare_training_splits(
             "selection_order": "processed train.jsonl original order; no shuffle before splitting",
             "deduplication_policy": (
                 "Strict cross-split uniqueness by id, source, target, and source-target pair. "
-                "Priority is global_test, global_dev, SFT, then GRPO; later duplicate rows are dropped."
+                "Priority is the in-domain test set, then SFT and GRPO; later duplicate rows are dropped."
             ),
             "training_policy": {
                 "sft": "cold start on sft_train; validate on sft_dev",
                 "grpo": "start from SFT adapter; train on grpo_train; monitor grpo_dev",
-                "development": "P0-P3 use global_dev only; it is never used for training",
-                "final_evaluation": "global_test is held out for final evaluation only",
+                "in_domain_evaluation": "P0-P5 use test only; it is never used for training",
             },
             "nominal_counts": {name: int(len(frame)) for name, frame in nominal_splits.items()},
             "counts": {name: int(len(frame)) for name, frame in splits.items()},
@@ -340,7 +330,7 @@ def prepare_training_splits(
 
 
 def build_arg_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="Build ordered SFT, GRPO, and global evaluation splits.")
+    parser = argparse.ArgumentParser(description="Build ordered SFT, GRPO, and in-domain test splits.")
     parser.add_argument("--dataset", required=True, choices=("en_eu", "en_ca", "all"))
     parser.add_argument("--processed-dir", default="data/processed")
     parser.add_argument("--output-dir", default="data/training")

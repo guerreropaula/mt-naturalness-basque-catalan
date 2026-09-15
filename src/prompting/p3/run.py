@@ -18,8 +18,8 @@ from src.prompting._shared import (
     resolve_generation_profile,
 )
 from src.prompting.p2.run import (
-    _load_p2_language_model as _load_output_language_model,
-    _validate_refinement_prediction as _validate_final_translation,
+    load_p2_language_model as _load_output_language_model,
+    validate_refinement_prediction as _validate_final_translation,
 )
 from src.utils.config import get_dataset_entry, get_experiment_entry, load_generation_config
 from src.utils.io import save_json, save_jsonl
@@ -75,8 +75,8 @@ def run_step_by_step_experiment(
     generation_config_path: str | Path = "configs/generation.yaml",
     preprocessing_config_path: str | Path = "configs/preprocessing.yaml",
     processed_dir: str | Path = "data/processed",
-    results_dir: str | Path = "results/experiments",
-    split: str = "dev",
+    results_dir: str | Path = "results/p0_p3",
+    split: str = "test",
     limit: int | None = None,
     force: bool = False,
 ) -> dict[str, Any]:
@@ -278,8 +278,8 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--generation-config", default="configs/generation.yaml")
     parser.add_argument("--preprocessing-config", default="configs/preprocessing.yaml")
     parser.add_argument("--processed-dir", default="data/processed")
-    parser.add_argument("--results-dir", default="results/experiments")
-    parser.add_argument("--split", default="test", choices=["train", "dev", "test"])
+    parser.add_argument("--results-dir", default="results/p0_p3")
+    parser.add_argument("--split", default="test", choices=["test"])
     parser.add_argument("--limit", type=int, default=None)
     parser.add_argument("--force", action="store_true")
     parser.add_argument(

@@ -11,7 +11,7 @@ from collections import Counter, defaultdict
 from pathlib import Path
 from typing import Any, Iterable
 
-from src.data.preprocessing import _load_fasttext_model, _predict_language
+from src.data.preprocessing import load_fasttext_model, predict_language
 from src.utils.config import (
     get_dataset_entry,
     get_experiment_entry,
@@ -76,7 +76,7 @@ def clean_mt_reason(
     if _COMMENTARY_RE.search(_normalised_ascii(text)):
         return "commentary_marker"
     if len(text.split()) >= 5 and language_model is not None:
-        language, confidence = _predict_language(language_model, text)
+        language, confidence = predict_language(language_model, text)
         if language != target_lang and confidence >= confidence_threshold:
             return "wrong_language"
     if text == str(reference).strip():
@@ -121,7 +121,7 @@ def generate_mt_negatives(
 
     preprocessing_config = load_preprocessing_config(preprocessing_config_path)
     language_config = preprocessing_config["language_id"]
-    language_model = _load_fasttext_model(str(language_config["model_path"]))
+    language_model = load_fasttext_model(str(language_config["model_path"]))
     confidence_threshold = float(language_config["confidence_threshold"])
     pairs_root = Path(classifier_config["source_pairs_dir"]) / dataset_key
     output_root = Path(classifier_config["output_dir"]) / dataset_key

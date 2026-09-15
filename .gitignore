@@ -1,0 +1,23 @@
+# Secrets and local environments
+.env
+.hf_token
+.env.example
+.venv/
+
+# Python and tool caches
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ruff_cache/
+
+# Restricted corpora and trained parameters
+data/
+models/
+*.epub
+
+# Local experiment infrastructure
+slurm/
+wandb/
+*.out
+*.err
+.

@@ -11,8 +11,8 @@ from typing import Any, Callable
 import numpy as np
 import pandas as pd
 
-from src.evaluation.metrics import compute_mattr, compute_mtld, tokenize_text
-from src.evaluation.paired_significance import (
+from src.evaluation.metrics.automatic import compute_mattr, compute_mtld, tokenize_text
+from src.evaluation.statistics.paired import (
     _ALIASES,
     _CONDITIONS,
     _metrics_path,
@@ -152,7 +152,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--results-root", type=Path, default=Path("results"))
     parser.add_argument("--dataset", required=True)
     parser.add_argument("--model", default="latxa_8b_instruct")
-    parser.add_argument("--evaluation-split", default="global_dev")
+    parser.add_argument("--evaluation-split", default="test")
     parser.add_argument("--baseline", default="P0")
     parser.add_argument(
         "--candidates",

@@ -625,7 +625,6 @@ def compute_automatic_metrics(
     df: pd.DataFrame,
     comet_model: str | None = None,
     xcomet_model: str | None = None,
-    comet_qe_model: str | None = None,
     cometkiwi_model: str | None = None,
     metricx_model: str | None = None,
     metricx_tokenizer: str = DEFAULT_METRICX_TOKENIZER,
@@ -648,7 +647,7 @@ def compute_automatic_metrics(
         df["reference"].fillna("").astype(str).tolist() if "reference" in df.columns else []
     )
     sources = df["source"].fillna("").astype(str).tolist() if "source" in df.columns else []
-    effective_cometkiwi_model = cometkiwi_model if cometkiwi_model is not None else comet_qe_model
+    effective_cometkiwi_model = cometkiwi_model
     comet_score = (
         compute_optional_comet(
             sources,
@@ -722,11 +721,9 @@ def compute_automatic_metrics(
             "comet": comet_score,
             "xcomet": xcomet_score,
             "cometkiwi": cometkiwi_score,
-            "comet_qe": cometkiwi_score,
             "metricx": metricx_score,
         },
         "reference_adequacy": {
             "cometkiwi": reference_cometkiwi_score,
-            "comet_qe": reference_cometkiwi_score,
         },
     }

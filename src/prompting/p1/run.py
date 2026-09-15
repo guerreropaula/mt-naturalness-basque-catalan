@@ -58,8 +58,8 @@ def run_system_prompt_experiment(
     dataset_config_path: str | Path = "configs/datasets.yaml",
     generation_config_path: str | Path = "configs/generation.yaml",
     processed_dir: str | Path = "data/processed",
-    results_dir: str | Path = "results/experiments",
-    split: str = "dev",
+    results_dir: str | Path = "results/p0_p3",
+    split: str = "test",
     limit: int | None = None,
     force: bool = False,
 ) -> dict[str, Any]:
@@ -192,8 +192,8 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--dataset-config", default="configs/datasets.yaml")
     parser.add_argument("--generation-config", default="configs/generation.yaml")
     parser.add_argument("--processed-dir", default="data/processed")
-    parser.add_argument("--results-dir", default="results/experiments")
-    parser.add_argument("--split", default="test", choices=["train", "dev", "test"])
+    parser.add_argument("--results-dir", default="results/p0_p3")
+    parser.add_argument("--split", default="test", choices=["test"])
     parser.add_argument("--limit", type=int, default=None)
     parser.add_argument("--force", action="store_true")
     parser.add_argument(

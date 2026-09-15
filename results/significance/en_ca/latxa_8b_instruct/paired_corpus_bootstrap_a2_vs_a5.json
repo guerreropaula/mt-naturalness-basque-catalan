@@ -4,7 +4,7 @@
   ],
   "baseline": "P5_GRPO_A2",
   "dataset": "en_ca",
-  "evaluation_split": "global_dev",
+  "evaluation_split": "test",
   "iterations": 1000,
   "method": "paired row bootstrap; concatenate sampled outputs and recompute corpus metric",
   "metrics": [

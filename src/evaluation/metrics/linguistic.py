@@ -5,11 +5,11 @@ from __future__ import annotations
 import logging
 from typing import Any
 
-from src.evaluation.lexical_diversity import (
+from src.evaluation.metrics.lexical import (
     compute_annotation_diversity_metrics,
     compute_lemma_wordform_diversity,
 )
-from src.evaluation.metrics import compute_ttr
+from src.evaluation.metrics.automatic import compute_ttr
 
 logger = logging.getLogger(__name__)
 

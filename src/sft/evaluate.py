@@ -11,7 +11,7 @@ from typing import Any
 import pandas as pd
 import torch
 
-from src.evaluation.metrics import compute_automatic_metrics
+from src.evaluation.metrics.automatic import compute_automatic_metrics
 from src.sft.data import load_jsonl_records
 from src.sft.train import load_sft_base_model, load_sft_tokenizer, resolve_sft_settings
 from src.utils.config import get_model_entry, load_sft_config
@@ -147,7 +147,7 @@ def _generate(
     return [text.strip() for text in tokenizer.batch_decode(continuation_ids, skip_special_tokens=True)]
 
 
-VALID_EVAL_SPLITS = ("global_dev", "global_test")
+VALID_EVAL_SPLITS = ("test",)
 
 
 def evaluate_sft_split(
@@ -158,7 +158,7 @@ def evaluate_sft_split(
     data_dir: str | Path | None = None,
     adapter_root: str | Path | None = None,
     results_root: str | Path | None = None,
-    split: str = "global_dev",
+    split: str = "test",
     limit: int | None = None,
     experiment_key: str = "p4_sft",
     evaluation_file: str | Path | None = None,
@@ -168,7 +168,7 @@ def evaluate_sft_split(
     resume: bool = True,
     sentence_boundary_count: int | None = None,
 ) -> dict[str, str]:
-    """Evaluate an adapter on a canonical global split or an explicit immutable file."""
+    """Evaluate an adapter on the in-domain test set or an explicit immutable file."""
     if evaluation_file is None and split not in VALID_EVAL_SPLITS:
         raise SFTEvaluationError(
             f"Unsupported SFT evaluation split: {split}. Choose one of {', '.join(VALID_EVAL_SPLITS)}, "
@@ -423,8 +423,7 @@ def evaluate_sft_split(
             "model_key": model_key,
             "adapter_dir": str(adapter_dir),
             "evaluation_split": split,
-            "global_dev_read": evaluation_file is None and split == "global_dev",
-            "global_test_read": evaluation_file is None and split == "global_test",
+            "in_domain_test_read": evaluation_file is None and split == "test",
             "explicit_evaluation_file": str(eval_path) if evaluation_file is not None else None,
             "input_path": str(eval_path),
             "examples": len(predictions),
@@ -456,32 +455,9 @@ def evaluate_sft_split(
     }
 
 
-def evaluate_sft_global_test(
-    dataset_key: str,
-    model_key: str,
-    config_path: str | Path = "configs/sft.yaml",
-    models_config_path: str | Path = "configs/models.yaml",
-    data_dir: str | Path | None = None,
-    adapter_root: str | Path | None = None,
-    results_root: str | Path | None = None,
-    limit: int | None = None,
-) -> dict[str, str]:
-    """Evaluate an adapter on global_test for final reporting."""
-    return evaluate_sft_split(
-        dataset_key,
-        model_key,
-        config_path,
-        models_config_path,
-        data_dir,
-        adapter_root,
-        results_root,
-        split="global_test",
-        limit=limit,
-    )
-
 
 def build_arg_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="Evaluate an SFT adapter on global_dev or global_test.")
+    parser = argparse.ArgumentParser(description="Evaluate an SFT adapter on the in-domain test set.")
     parser.add_argument("--dataset", required=True, choices=("en_eu", "en_ca"))
     parser.add_argument("--model", required=True)
     parser.add_argument("--config", default="configs/sft.yaml")
@@ -489,7 +465,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--data-dir", default=None)
     parser.add_argument("--adapter-root", default=None)
     parser.add_argument("--results-root", default=None)
-    parser.add_argument("--split", default="global_dev", help="Canonical split label, or a label for --evaluation-file.")
+    parser.add_argument("--split", default="test", help="Canonical split label, or a label for --evaluation-file.")
     parser.add_argument("--limit", type=int, default=None)
     parser.add_argument("--experiment-key", default="p4_sft")
     parser.add_argument("--evaluation-file", default=None, help="Immutable JSONL with id/source/target fields.")

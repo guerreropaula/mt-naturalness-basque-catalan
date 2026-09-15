@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import argparse
-import json
 import logging
 from collections import Counter
 from dataclasses import dataclass
@@ -15,17 +14,71 @@ import pandas as pd
 from src.data.loaders import load_dataset
 from src.data.normalization import normalize_text
 from src.data.preprocessing import (
-    _basic_text_reason,
-    _length_reason,
-    _load_fasttext_model,
-    _predict_language,
-    _score_alignment_batch,
+    basic_text_rejection_reason,
+    length_rejection_reason,
+    load_fasttext_model,
+    predict_language,
 )
 from src.prompting._shared import load_processed_split
 from src.utils.config import get_dataset_entry, load_classifier_config, load_preprocessing_config
 from src.utils.io import save_json, save_jsonl
 
 logger = logging.getLogger(__name__)
+
+
+class ClassifierQualityError(RuntimeError):
+    """Raised when COMETKiwi quality scoring for classifier positives fails."""
+
+
+_COMET_MODEL_CACHE: dict[str, Any] = {}
+
+
+def _default_quality_gpus() -> int:
+    try:
+        import torch
+    except Exception:
+        return 0
+    return 1 if torch.cuda.is_available() else 0
+
+
+def _load_quality_model(model_name: str) -> Any:
+    if model_name in _COMET_MODEL_CACHE:
+        return _COMET_MODEL_CACHE[model_name]
+    try:
+        from comet import download_model, load_from_checkpoint
+    except Exception as exc:
+        raise ClassifierQualityError(
+            "COMET is required for Catalan classifier-positive filtering."
+        ) from exc
+    model = load_from_checkpoint(download_model(model_name))
+    _COMET_MODEL_CACHE[model_name] = model
+    return model
+
+
+def _score_quality_batch(
+    sources: list[str], targets: list[str], quality_config: dict[str, Any]
+) -> list[float]:
+    records = [
+        {"src": source, "mt": target}
+        for source, target in zip(sources, targets, strict=True)
+    ]
+    outputs = _load_quality_model(str(quality_config["model"])).predict(
+        records,
+        batch_size=int(quality_config.get("batch_size", 8)),
+        gpus=int(quality_config.get("gpus", _default_quality_gpus())),
+        progress_bar=bool(quality_config.get("progress_bar", False)),
+    )
+    if hasattr(outputs, "scores"):
+        scores = [float(score) for score in outputs.scores]
+    elif isinstance(outputs, dict) and "scores" in outputs:
+        scores = [float(score) for score in outputs["scores"]]
+    else:
+        raise ClassifierQualityError("COMETKiwi output has no per-example scores.")
+    if len(scores) != len(records):
+        raise ClassifierQualityError(
+            f"COMETKiwi returned {len(scores)} scores for {len(records)} records."
+        )
+    return scores
 
 
 class ClassifierDataError(RuntimeError):
@@ -66,7 +119,7 @@ def classifier_sizes(config: dict[str, Any], size_mode: str) -> PairSplitSizes:
 def _existing_records(dataset_key: str, processed_dir: str | Path) -> list[dict[str, str]]:
     records: list[dict[str, str]] = []
     processed_root = Path(processed_dir) / dataset_key
-    splits = ["train", "dev", "test"]
+    splits = ["train", "test"]
     if (processed_root / "lfp_background.jsonl").exists() or (
         processed_root / "lfp_background.parquet"
     ).exists():
@@ -110,19 +163,19 @@ def _candidate_reason(
     language_model: Any,
 ) -> str | None:
     text_filtering = preprocessing_config["text_filtering"]
-    reason = _basic_text_reason(source, text_filtering, "source")
-    reason = reason or _basic_text_reason(target, text_filtering, "target")
+    reason = basic_text_rejection_reason(source, text_filtering, "source")
+    reason = reason or basic_text_rejection_reason(target, text_filtering, "target")
     if reason is not None:
         return reason
     language_config = preprocessing_config["language_id"]
     threshold = float(language_config["confidence_threshold"])
-    source_lang, source_score = _predict_language(language_model, source)
-    target_lang, target_score = _predict_language(language_model, target)
+    source_lang, source_score = predict_language(language_model, source)
+    target_lang, target_score = predict_language(language_model, target)
     if source_lang != dataset_entry["source_lang"] or source_score < threshold:
         return "source_language_mismatch"
     if target_lang != dataset_entry["target_lang"] or target_score < threshold:
         return "target_language_mismatch"
-    return _length_reason(source, target, preprocessing_config["length_filtering"])
+    return length_rejection_reason(source, target, preprocessing_config["length_filtering"])
 
 
 def _overlap_reason(
@@ -276,7 +329,7 @@ def select_quality_filtered_classifier_pairs(
     def flush_pending() -> None:
         if not pending or len(selected) >= sizes.total:
             return
-        scores = _score_alignment_batch(
+        scores = _score_quality_batch(
             [str(record["source"]) for record in pending],
             [str(record["target"]) for record in pending],
             quality_config,
@@ -442,7 +495,7 @@ def prepare_classifier_source_data(
     sizes = classifier_sizes(classifier_config, size_mode)
     existing = _existing_records(dataset_key, processed_dir)
     raw_frame = load_dataset(dataset_key, datasets_config_path)
-    language_model = _load_fasttext_model(str(preprocessing_config["language_id"]["model_path"]))
+    language_model = load_fasttext_model(str(preprocessing_config["language_id"]["model_path"]))
     quality_config = dict(
         classifier_config["classifier"].get("positive_quality_filter", {}).get(dataset_key, {})
     )
@@ -524,137 +577,6 @@ def prepare_classifier_source_data(
     return paths
 
 
-def _load_saved_pair_records(pairs_root: Path) -> list[dict[str, Any]]:
-    records: list[dict[str, Any]] = []
-    for split in ("train", "dev", "test"):
-        path = pairs_root / f"{split}.jsonl"
-        if not path.exists():
-            raise FileNotFoundError(f"Classifier source pairs are missing: {path}")
-        with path.open(encoding="utf-8") as handle:
-            records.extend(json.loads(line) for line in handle if line.strip())
-    return records
-
-
-def _selection_time_existing_records(
-    existing_records: Iterable[dict[str, str]], saved_records: Iterable[dict[str, Any]]
-) -> tuple[list[dict[str, str]], int]:
-    """Remove allocation records that were introduced after saved selection.
-
-    A saved classifier row could not have overlapped any exclusion key at the
-    time it was selected. Therefore an overlap between a saved row and the
-    current allocation is evidence that the allocation changed later, rather
-    than a reason to invalidate the historical selection replay.
-    """
-    saved_keys = _exclusion_sets(
-        {
-            "source_id": str(record["source_id"]),
-            "source": str(record["source"]),
-            "target": str(record["target"]),
-        }
-        for record in saved_records
-    )
-    retained: list[dict[str, str]] = []
-    removed = 0
-    for record in existing_records:
-        if (
-            record["source_id"] in saved_keys["source_id"]
-            or record["source"] in saved_keys["source"]
-            or record["target"] in saved_keys["target"]
-            or _pair_key(record["source"], record["target"]) in saved_keys["pair"]
-        ):
-            removed += 1
-        else:
-            retained.append(record)
-    return retained, removed
-
-
-def replay_classifier_source_audit(
-    dataset_key: str,
-    size_mode: str = "matched",
-    datasets_config_path: str | Path = "configs/datasets.yaml",
-    preprocessing_config_path: str | Path = "configs/preprocessing.yaml",
-    classifier_config_path: str | Path = "configs/classifier.yaml",
-    processed_dir: str | Path = "data/processed",
-) -> Path:
-    """Replay an existing classifier-source selection and save first-failure counts.
-
-    The saved source-pair files are never modified. For quality-filtered Catalan,
-    this deliberately recomputes the configured COMETKiwi decision so that rejected
-    candidates, which are not retained elsewhere, are still auditable.
-    """
-    classifier_config = load_classifier_config(classifier_config_path)
-    preprocessing_config = load_preprocessing_config(preprocessing_config_path)
-    dataset_entry = get_dataset_entry(dataset_key, datasets_config_path)
-    sizes = classifier_sizes(classifier_config, size_mode)
-    pairs_root = Path(classifier_config["classifier"]["source_pairs_dir"]) / dataset_key
-    saved_records = _load_saved_pair_records(pairs_root)
-    if len(saved_records) != sizes.total:
-        raise ClassifierDataError(
-            f"Saved {dataset_key} classifier pairs contain {len(saved_records)} rows; expected {sizes.total}."
-        )
-
-    overlap_path = pairs_root / "overlap_audit.json"
-    previous_audit = json.loads(overlap_path.read_text(encoding="utf-8")) if overlap_path.exists() else {}
-    quality_config = dict(
-        classifier_config["classifier"].get("positive_quality_filter", {}).get(dataset_key, {})
-    )
-    quality_enabled = bool(quality_config.get("enabled", False))
-    if quality_enabled:
-        scan_limit = int(previous_audit.get("positive_quality_filter", {}).get("rows_scanned", 0))
-    else:
-        scan_limit = max(int(record["original_index"]) for record in saved_records) + 1
-    if scan_limit < 1:
-        raise ClassifierDataError(f"Cannot infer the replay limit for {dataset_key}.")
-
-    current_existing = _existing_records(dataset_key, processed_dir)
-    existing, later_overlap_records_removed = _selection_time_existing_records(
-        current_existing, saved_records
-    )
-    raw_frame = load_dataset(dataset_key, datasets_config_path, limit=scan_limit)
-    language_model = _load_fasttext_model(str(preprocessing_config["language_id"]["model_path"]))
-    selection_audit: dict[str, Any] = {}
-    if quality_enabled:
-        replayed = select_quality_filtered_classifier_pairs(
-            raw_frame,
-            dataset_entry,
-            preprocessing_config,
-            existing,
-            sizes,
-            language_model,
-            quality_config,
-            selection_audit,
-        )
-    else:
-        replayed = select_disjoint_classifier_pairs(
-            raw_frame,
-            dataset_entry,
-            preprocessing_config,
-            existing,
-            sizes,
-            language_model,
-            selection_audit,
-        )
-    replayed_ids = [str(record["source_id"]) for split in ("train", "dev", "test") for record in replayed[split]]
-    saved_ids = [str(record["source_id"]) for record in saved_records]
-    if set(replayed_ids) != set(saved_ids):
-        raise ClassifierDataError(
-            f"Classifier selection replay for {dataset_key} did not reproduce the saved source-pair membership."
-        )
-
-    report = {
-        "dataset_key": dataset_key,
-        "size_mode": size_mode,
-        "rows_loaded_for_replay": scan_limit,
-        "later_allocation_records_removed_for_replay": later_overlap_records_removed,
-        "selection_replay_passed": True,
-        "selection_order_reproduced": replayed_ids == saved_ids,
-        "selection_audit": selection_audit,
-    }
-    output_path = pairs_root / "selection_audit.json"
-    save_json(report, output_path)
-    return output_path
-
-
 def build_arg_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Build disjoint ordered classifier source/reference splits.")
     parser.add_argument("--dataset", required=True, choices=("en_eu", "en_ca"))
@@ -664,11 +586,6 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--classifier-config", default="configs/classifier.yaml")
     parser.add_argument("--processed-dir", default="data/processed")
     parser.add_argument("--force", action="store_true")
-    parser.add_argument(
-        "--audit-only",
-        action="store_true",
-        help="Replay existing source-pair selection and write first-failure counts without replacing splits.",
-    )
     return parser
 
 
@@ -683,12 +600,8 @@ def main() -> None:
         "classifier_config_path": args.classifier_config,
         "processed_dir": args.processed_dir,
     }
-    if args.audit_only:
-        output = replay_classifier_source_audit(**common)
-        logger.info("Classifier source-selection audit written: %s", output)
-    else:
-        paths = prepare_classifier_source_data(**common, force=args.force)
-        logger.info("Classifier source data written: %s", paths)
+    paths = prepare_classifier_source_data(**common, force=args.force)
+    logger.info("Classifier source data written: %s", paths)
 
 
 if __name__ == "__main__":

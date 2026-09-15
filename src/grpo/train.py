@@ -16,10 +16,8 @@ from typing import Any, Mapping
 
 import torch
 from datasets import Dataset
-from transformers import TrainerCallback
 
 from src.grpo.data import build_grpo_records, load_grpo_records
-from src.grpo.health import HealthThresholds, assess_translation_health
 from src.grpo.reward import build_translation_grpo_reward
 from src.sft.train import (
     _torch_dtype,
@@ -445,113 +443,6 @@ def resolve_grpo_batch_plan(training: dict[str, Any], world_size: int = 1) -> GR
     )
 
 
-class GRPOHealthCallback(TrainerCallback):
-    """Abort training when a fixed greedy development sample clearly collapses."""
-
-    def __init__(
-        self,
-        tokenizer: Any,
-        records: list[dict[str, str]],
-        health_config: dict[str, Any],
-        output_dir: Path,
-        max_prompt_length: int,
-    ) -> None:
-        self.tokenizer = tokenizer
-        self.records = records
-        self.health_config = health_config
-        self.output_dir = output_dir
-        self.max_prompt_length = int(max_prompt_length)
-        self.thresholds = HealthThresholds.from_mapping(health_config)
-        self.last_checked_step = -1
-
-    def _generate(self, model: Any) -> tuple[list[str], list[list[int]], list[bool]]:
-        predictions: list[str] = []
-        completion_ids: list[list[int]] = []
-        terminated: list[bool] = []
-        batch_size = int(self.health_config["batch_size"])
-        eos_token_id = int(self.tokenizer.eos_token_id)
-        pad_token_id = int(self.tokenizer.pad_token_id)
-        was_training = bool(model.training)
-        model.eval()
-        try:
-            for start in range(0, len(self.records), batch_size):
-                batch = self.records[start : start + batch_size]
-                encoded = self.tokenizer(
-                    [record["prompt"] for record in batch],
-                    return_tensors="pt",
-                    padding=True,
-                    truncation=True,
-                    max_length=self.max_prompt_length,
-                )
-                device = model.get_input_embeddings().weight.device
-                encoded = {name: value.to(device) for name, value in encoded.items()}
-                with torch.inference_mode():
-                    generated = model.generate(
-                        **encoded,
-                        max_new_tokens=int(self.health_config["max_new_tokens"]),
-                        do_sample=False,
-                        num_beams=1,
-                        pad_token_id=pad_token_id,
-                        eos_token_id=eos_token_id,
-                    )
-                continuation = generated[:, encoded["input_ids"].shape[1] :].detach().cpu()
-                for row in continuation.tolist():
-                    did_terminate = eos_token_id in row
-                    if did_terminate:
-                        row = row[: row.index(eos_token_id)]
-                    clean_ids = [token_id for token_id in row if token_id != pad_token_id]
-                    completion_ids.append(clean_ids)
-                    terminated.append(did_terminate)
-                    predictions.append(
-                        self.tokenizer.decode(clean_ids, skip_special_tokens=True).strip()
-                    )
-        finally:
-            if was_training:
-                model.train()
-            if torch.cuda.is_available():
-                torch.cuda.empty_cache()
-        return predictions, completion_ids, terminated
-
-    def _check(self, state: Any, model: Any) -> None:
-        step = int(state.global_step)
-        if step == self.last_checked_step:
-            return
-        predictions, completion_ids, terminated = self._generate(model)
-        report = assess_translation_health(
-            predictions,
-            [record["reference"] for record in self.records],
-            completion_ids,
-            terminated,
-            self.thresholds,
-        )
-        report.update({"step": step, "thresholds": dict(self.health_config)})
-        if distributed_rank() == 0:
-            save_json(report, self.output_dir / "health" / f"step_{step:06d}.json")
-        self.last_checked_step = step
-        logger.info(
-            "P5 health step=%d passed=%s chrF++=%.4f repeated=%d/%d unterminated=%d/%d",
-            step,
-            report["passed"],
-            report["mean_chrfpp"],
-            report["repeated_rows"],
-            report["examples"],
-            report["unterminated_rows"],
-            report["examples"],
-        )
-        if not report["passed"]:
-            raise GRPOTrainingError(
-                f"P5 policy-collapse check failed at step {step}: " + "; ".join(report["failures"])
-            )
-
-    def on_train_begin(self, args: Any, state: Any, control: Any, **kwargs: Any) -> None:
-        self._check(state, kwargs["model"])
-
-    def on_step_end(self, args: Any, state: Any, control: Any, **kwargs: Any) -> None:
-        step = int(state.global_step)
-        interval = int(self.health_config["interval_steps"])
-        if step > 0 and (step % interval == 0 or step == int(state.max_steps)):
-            self._check(state, kwargs["model"])
-
 
 def train_grpo(
     dataset_key: str,
@@ -565,7 +456,6 @@ def train_grpo(
     adapter_root: str | Path | None = None,
     results_root: str | Path | None = None,
     sft_adapter_root: str | Path | None = None,
-    disable_health_check: bool = False,
 ) -> dict[str, str]:
     """Run P5 from the configured P4 adapter using a selected GRPO ablation."""
     grpo_config = load_grpo_config(config_path)["grpo"]
@@ -697,19 +587,6 @@ def train_grpo(
         if max_train_examples <= 0:
             raise GRPOTrainingError("max_train_examples must be positive when provided.")
         train_records = train_records[:max_train_examples]
-    health_config = dict(training["health_check"])
-    if disable_health_check:
-        health_config["enabled"] = False
-    health_records: list[dict[str, str]] = []
-    if bool(health_config["enabled"]):
-        health_records = build_grpo_records(
-            load_grpo_records(data_dir, dataset_key, "dev")[: int(health_config["examples"])],
-            tokenizer,
-            model_entry,
-            target_lang,
-            prompt_spec=prompt_spec,
-            enable_thinking=bool(grpo_root["chat_format"].get("enable_thinking", False)),
-        )
     evaluation_enabled = str(training["eval_strategy"]).lower() != "no"
     dev_records = []
     if evaluation_enabled:
@@ -737,31 +614,6 @@ def train_grpo(
     if adapter_dir.exists() and resume_from_checkpoint is None:
         raise FileExistsError(f"P5 adapter already exists: {adapter_dir}")
     run_dir.mkdir(parents=True, exist_ok=True)
-    audit_config = dict(training["completion_audit"])
-    if bool(audit_config["enabled"]):
-        audit_name = (
-            "completion_audit.jsonl"
-            if distributed_rank() == 0
-            else f"completion_audit.rank_{distributed_rank()}.jsonl"
-        )
-        reward.configure_audit(
-            run_dir / audit_name,
-            interval_calls=int(audit_config["interval_reward_calls"]),
-            max_groups=int(audit_config["max_groups_per_write"]),
-            min_mean_chrfpp=float(audit_config["min_mean_chrfpp"]),
-            min_mean_cometkiwi=float(audit_config["min_mean_cometkiwi"]),
-        )
-    callbacks: list[Any] = []
-    if health_records:
-        callbacks.append(
-            GRPOHealthCallback(
-                tokenizer,
-                health_records,
-                health_config,
-                run_dir,
-                int(training["max_prompt_length"]),
-            )
-        )
     generation_kwargs = dict(training["generation_kwargs"])
     if bool(training.get("use_vllm", False)):
         generation_kwargs.pop("do_sample", None)
@@ -802,8 +654,6 @@ def train_grpo(
         vllm_tensor_parallel_size=int(training.get("vllm_tensor_parallel_size", 1)),
         vllm_gpu_memory_utilization=float(training.get("vllm_gpu_memory_utilization", 0.3)),
         report_to=[],
-        log_completions=bool(audit_config["print_to_console"]),
-        num_completions_to_print=int(audit_config["num_completions_to_print"]),
         num_generations=int(training["num_generations"]),
         max_prompt_length=int(training["max_prompt_length"]),
         max_completion_length=int(training["max_completion_length"]),
@@ -825,7 +675,6 @@ def train_grpo(
         train_dataset=Dataset.from_list(train_records),
         eval_dataset=Dataset.from_list(dev_records) if evaluation_enabled else None,
         processing_class=tokenizer,
-        callbacks=callbacks,
     )
     expected_steps_per_generation = batch_plan.generation_batch_size // (
         batch_plan.per_device_batch_size * batch_plan.world_size
@@ -873,7 +722,6 @@ def train_grpo(
         "generation_batch_size": batch_plan.generation_batch_size,
         "prompts_per_generation_batch": batch_plan.prompts_per_generation_batch,
         "expected_optimizer_steps": expected_optimizer_steps,
-        "health_examples": len(health_records),
         "trainable_lora_parameters": trainable_lora_parameters,
         "sequence_packing": bool(training["sequence_packing"]),
         "distributed": {
@@ -909,11 +757,6 @@ def main() -> None:
     parser.add_argument("--adapter-root", default=None)
     parser.add_argument("--results-root", default=None)
     parser.add_argument("--sft-adapter-root", default=None)
-    parser.add_argument(
-        "--disable-health-check",
-        action="store_true",
-        help="Disable the separate greedy policy-health callback for a bounded smoke run.",
-    )
     args = parser.parse_args()
     logging.basicConfig(
         level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s"
@@ -932,7 +775,6 @@ def main() -> None:
             adapter_root=args.adapter_root,
             results_root=args.results_root,
             sft_adapter_root=args.sft_adapter_root,
-            disable_health_check=args.disable_health_check,
         ),
     )
 

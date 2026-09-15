@@ -56,7 +56,7 @@ def _metrics_path(
     label: str,
     dataset: str,
     model: str,
-    evaluation_split: str = "global_dev",
+    evaluation_split: str = "test",
 ) -> Path:
     """Return the canonical per-example metric path for a P0-P5 condition."""
     key = str(label).strip().lower()
@@ -265,7 +265,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--results-root", type=Path, default=Path("results"))
     parser.add_argument("--dataset", required=True, help="Dataset key, for example en_ca or en_eu.")
     parser.add_argument("--model", default="latxa_8b_instruct", help="Model output directory name.")
-    parser.add_argument("--evaluation-split", default="global_dev", help="P4/P5 evaluation split.")
+    parser.add_argument("--evaluation-split", default="test", help="P4/P5 evaluation split.")
     parser.add_argument(
         "--baseline",
         default="P0",

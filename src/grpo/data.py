@@ -51,6 +51,6 @@ def build_grpo_records(
 
 def load_grpo_records(data_dir: str | Path, dataset_key: str, split: str) -> list[dict[str, Any]]:
     """Load one fixed ordered GRPO split from the training layout."""
-    if split not in {"train", "dev", "test"}:
+    if split not in {"train", "dev"}:
         raise GRPODataError(f"Unsupported GRPO split '{split}'.")
     return load_jsonl_records(Path(data_dir) / dataset_key / "grpo" / f"{split}.jsonl")

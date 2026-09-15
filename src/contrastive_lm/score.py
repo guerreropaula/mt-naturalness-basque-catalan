@@ -12,7 +12,7 @@ import torch
 import torch.nn.functional as F
 from transformers import AutoTokenizer
 
-from src.contrastive_lm.train import _load_base_model
+from src.contrastive_lm.train import load_base_model
 from src.utils.config import load_contrastive_lm_config
 from src.utils.hf_auth import get_hf_token
 from src.utils.io import save_json, save_jsonl
@@ -42,7 +42,7 @@ def load_adapter_lm(base_model: str, adapter_dir: Path, load_in_4bit: bool) -> t
         raise ContrastiveLMScoringError("Tokenizer must provide an EOS or PAD token.")
     tokenizer.padding_side = "right"
     model = PeftModel.from_pretrained(
-        _load_base_model(base_model, load_in_4bit=load_in_4bit, training=False), adapter_dir
+        load_base_model(base_model, load_in_4bit=load_in_4bit, training=False), adapter_dir
     )
     model.eval()
     return model, tokenizer

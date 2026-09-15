@@ -109,7 +109,7 @@ def run_baseline_inference(
     generation_config_path: str | Path = "configs/generation.yaml",
     processed_dir: str | Path = "data/processed",
     results_dir: str | Path = "results/p0_p3/p0",
-    split: str = "dev",
+    split: str = "test",
     output_split: str | None = None,
     evaluation_file: str | Path | None = None,
     output_dataset_key: str | None = None,
@@ -256,8 +256,8 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--generation-config", default="configs/generation.yaml")
     parser.add_argument("--processed-dir", default="data/processed")
     parser.add_argument("--results-dir", default="results/p0_p3/p0")
-    parser.add_argument("--split", default="test", choices=["train", "dev", "test"])
-    parser.add_argument("--output-split", default=None, help="Optional isolated output directory label, for example global_test.")
+    parser.add_argument("--split", default="test", choices=["test"])
+    parser.add_argument("--output-split", default=None, help="Optional isolated output directory label, for example flores_test.")
     parser.add_argument("--evaluation-file", default=None, help="Immutable JSONL with id/source/target fields.")
     parser.add_argument("--output-dataset-key", default=None, help="Dataset label used only for result paths.")
     parser.add_argument("--limit", type=int, default=None)

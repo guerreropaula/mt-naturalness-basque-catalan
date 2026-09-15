@@ -32,11 +32,9 @@ length_filtering:
   max_char_ratio: 4.0
 
 splits:
-  train_size: 100000
-  # Held-out final evaluation.
+  train_size: 96000
+  # In-domain test set used by P0-P5; never used for training.
   test_size: 2000
-  # Prompt and model development.
-  dev_size: 2000
   # Target-side LFP background, disjoint from all other splits.
   lfp_background_size: 70000
   # Replaces lower-priority split rows removed by cross-split de-duplication.

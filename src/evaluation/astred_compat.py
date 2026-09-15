@@ -35,7 +35,7 @@ def main() -> None:
     if not args.apply:
         raise SystemExit(
             "ASTrED needs the awesome-align compatibility patch. Run: "
-            "python -m src.evaluation.patch_astred_awesome_align --apply"
+            "python -m src.evaluation.astred_compat --apply"
         )
     aligner_path.write_text(text.replace(OLD, NEW), encoding="utf-8")
     print(f"Patched {aligner_path}")
