@@ -44,7 +44,7 @@ Eight open-weight LLMs are evaluated under P0:
 | [Qwen3](https://huggingface.co/Qwen/Qwen3-8B) | 8B | General multilingual baseline |
 | [Qwen3](https://huggingface.co/Qwen/Qwen3-32B) | 32B | General multilingual baseline |
 
-After P0 screening, **Latxa 8B, Latxa 70B, and Gemma 3 27B** continue to the prompting experiments, while **Latxa 8B and SalamandraTA 7B** continue to SFT and GRPO. Model identifiers and inference settings are defined in `configs/models.yaml`.
+After P0 baseline analysis, **Latxa 8B, Latxa 70B, and Gemma 3 27B** continue to the prompting experiments, while **Latxa 8B and SalamandraTA 7B** continue to SFT and GRPO. Model identifiers and inference settings are defined in `configs/models.yaml`.
 
 ## Data
 
@@ -52,10 +52,6 @@ After P0 screening, **Latxa 8B, Latxa 70B, and Gemma 3 27B** continue to the pro
 
 - **English→Basque:** [EHU-HAC](https://www.ehu.eus/ehg/hac/), a multilingual parallel corpus constructed from published books.
 - **English→Catalan:** [AINA CA-EN Parallel Corpus](https://huggingface.co/datasets/projecte-aina/CA-EN_Parallel_Corpus), using material from the `HRM` and `CUL` domains.
-
-Both corpora undergo Unicode normalization, FastText language identification, segment-length filtering, length-ratio filtering, and duplicate removal. Separate partitions are reserved for SFT training/development, GRPO training/development, in-domain evaluation, naturalness-estimator training, and lexical-frequency statistics. For each language direction, the allocation includes 76,000 SFT training pairs, 2,000 SFT development pairs, 16,000 GRPO training pairs, 2,000 GRPO development pairs, and a 2,000-pair test split used for all in-domain comparisons.
-
-The original corpora are **not redistributed**. Authorized local paths can be configured in `configs/datasets.yaml`.
 
 ### Out-of-Domain Evaluation
 
@@ -81,30 +77,23 @@ BLEU, chrF++, TER, COMET, XCOMET, COMETKiwi, and MetricX-24.
 - **Synonym variation:** SynTTR, PTF, CDU (using Apertium bilingual dictionaries for [Catalan-English](https://github.com/apertium/apertium-eng-cat) and [Basque-English](https://github.com/apertium/apertium-eu-en))
 - **Syntactic structure:** ASTrED tree-edit distance, word crossing, sequence crossing, SACr crossing
 
-### Statistical Inference
-Paired bootstrap and randomization tests for sentence-level metrics; paired corpus-level bootstrap for MTLD and MATTR.
-
-System output is compared against the **human-reference profile**: changes are interpreted according to whether they move the translation closer to or farther from that profile, not simply maximized or minimized.
-
 ## Repository Structure
 
 ```text
-configs/                   Experiment, dataset, model, SFT, GRPO, and estimator settings
-results/                   Aggregated in-domain, out-of-domain, and statistical results
+configs/                   Experiment, dataset, model, SFT, GRPO, and naturalness estimators settings
+results/                   In-domain, out-of-domain, and statistical results
 src/data/                  Corpus preprocessing and split construction
 src/prompting/             P0–P3 prompting experiments
 src/sft/                   P4 data preparation, training, and evaluation
 src/grpo/                  P5 rewards, training, ablations, and evaluation
-src/classifiers/           Discriminative HT-vs-MT naturalness estimators
+src/classifiers/           Binary HT-vs-MT naturalness classifiers
 src/contrastive_lm/        Contrastive language-model naturalness estimators
-src/evaluation/run.py      Translation-quality and naturalness evaluation
+src/evaluation/run.py      Translation quality and naturalness evaluation
 src/evaluation/metrics/    Automatic, lexical, morphological, and syntactic metrics
 src/evaluation/statistics/ Paired significance tests and corpus-level bootstrap
 src/evaluation/compare.py  Aggregate P0–P5 comparison tables
-src/utils/                 Shared configuration, I/O, and model-loading utilities
+src/utils/                 Shared configuration  and model-loading utilities
 ```
-
-Model checkpoints, caches, cluster-specific scheduler files, exploratory scripts, and copyrighted text are excluded.
 
 ## Installation
 
@@ -174,7 +163,7 @@ python -m src.grpo.train --dataset en_eu --model latxa_8b_instruct --ablation a2
 python -m src.grpo.evaluate --dataset en_eu --model latxa_8b_instruct --ablation a2 --split test
 ```
 
-GRPO training samples eight completions per source at temperature 0.6, as group-relative rewards and Self-BLEU require variation within each group. Other reward configurations can be selected with `--ablation`.
+Other reward configurations can be selected with `--ablation`.
 
 ### Evaluation and Statistical Analysis
 
@@ -199,7 +188,7 @@ python -m src.evaluation.statistics.corpus \
 
 ## Released Results
 
-The `results/` directory contains aggregate comparison matrices for the in-domain, FLORES+, news, and literary evaluations, together with the A2-versus-A5 significance tests. No generated translations, model checkpoints, or copyrighted text is included.
+The `results/` directory contains aggregate comparison matrices for the in-domain, FLORES+, news, and literary evaluations, together with the A2-versus-A5 significance tests.
 
 ## Author
 
