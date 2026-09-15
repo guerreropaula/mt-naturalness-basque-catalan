@@ -1,0 +1,61 @@
+{
+  "available_candidates": [
+    "P5_GRPO_A5"
+  ],
+  "baseline": "P5_GRPO_A2",
+  "dataset": "en_ca",
+  "evaluation_split": "global_dev",
+  "iterations": 1000,
+  "method": "paired row bootstrap; concatenate sampled outputs and recompute corpus metric",
+  "metrics": [
+    "mtld",
+    "mattr_50"
+  ],
+  "model": "latxa_8b_instruct",
+  "requested_candidates": [
+    "P5_GRPO_A5"
+  ],
+  "results": [
+    {
+      "analysis_level": "corpus",
+      "baseline": "P5_GRPO_A2",
+      "baseline_ci_95_lower": 125.23373866660742,
+      "baseline_ci_95_upper": 134.53678145071967,
+      "baseline_score": 131.26916956128224,
+      "candidate": "P5_GRPO_A5",
+      "candidate_ci_95_lower": 126.68760024712739,
+      "candidate_ci_95_upper": 136.3573341716092,
+      "candidate_score": 133.58568676312507,
+      "delta_candidate_minus_baseline": 2.316517201842828,
+      "delta_ci_95_lower": -1.226806015004945,
+      "delta_ci_95_upper": 4.5008819826119035,
+      "direction": "higher_is_better",
+      "metric": "mtld",
+      "paired_rows": 2000,
+      "skip_reason": "",
+      "status": "ok",
+      "valid_bootstrap_samples": 1000
+    },
+    {
+      "analysis_level": "corpus",
+      "baseline": "P5_GRPO_A2",
+      "baseline_ci_95_lower": 0.8338573920498806,
+      "baseline_ci_95_upper": 0.8405874934334762,
+      "baseline_score": 0.8376036866359297,
+      "candidate": "P5_GRPO_A5",
+      "candidate_ci_95_lower": 0.8357324744969162,
+      "candidate_ci_95_upper": 0.8424835701973742,
+      "candidate_score": 0.8398202510104066,
+      "delta_candidate_minus_baseline": 0.002216564374476926,
+      "delta_ci_95_lower": 0.0005991327238470013,
+      "delta_ci_95_upper": 0.0034142452545547724,
+      "direction": "higher_is_better",
+      "metric": "mattr_50",
+      "paired_rows": 2000,
+      "skip_reason": "",
+      "status": "ok",
+      "valid_bootstrap_samples": 1000
+    }
+  ],
+  "seed": 42
+}

@@ -1,0 +1,61 @@
+{
+  "available_candidates": [
+    "P5_GRPO_A5"
+  ],
+  "baseline": "P5_GRPO_A2",
+  "dataset": "en_eu",
+  "evaluation_split": "global_dev",
+  "iterations": 1000,
+  "method": "paired row bootstrap; concatenate sampled outputs and recompute corpus metric",
+  "metrics": [
+    "mtld",
+    "mattr_50"
+  ],
+  "model": "salamandrata_7b_instruct",
+  "requested_candidates": [
+    "P5_GRPO_A5"
+  ],
+  "results": [
+    {
+      "analysis_level": "corpus",
+      "baseline": "P5_GRPO_A2",
+      "baseline_ci_95_lower": 146.39096003239752,
+      "baseline_ci_95_upper": 244.90513063243503,
+      "baseline_score": 138.34451793577503,
+      "candidate": "P5_GRPO_A5",
+      "candidate_ci_95_lower": 88.12532762726124,
+      "candidate_ci_95_upper": 213.84234357029595,
+      "candidate_score": 102.96093051568894,
+      "delta_candidate_minus_baseline": -35.38358742008609,
+      "delta_ci_95_lower": -140.03057311389296,
+      "delta_ci_95_upper": 31.0698694282386,
+      "direction": "higher_is_better",
+      "metric": "mtld",
+      "paired_rows": 2000,
+      "skip_reason": "",
+      "status": "ok",
+      "valid_bootstrap_samples": 1000
+    },
+    {
+      "analysis_level": "corpus",
+      "baseline": "P5_GRPO_A2",
+      "baseline_ci_95_lower": 0.8407473926383696,
+      "baseline_ci_95_upper": 0.8682249332420572,
+      "baseline_score": 0.8363801985602529,
+      "candidate": "P5_GRPO_A5",
+      "candidate_ci_95_lower": 0.8023349382213905,
+      "candidate_ci_95_upper": 0.8651801602958205,
+      "candidate_score": 0.8159235031277695,
+      "delta_candidate_minus_baseline": -0.020456695432483407,
+      "delta_ci_95_lower": -0.055816557226190014,
+      "delta_ci_95_upper": 0.011455016388023915,
+      "direction": "higher_is_better",
+      "metric": "mattr_50",
+      "paired_rows": 2000,
+      "skip_reason": "",
+      "status": "ok",
+      "valid_bootstrap_samples": 1000
+    }
+  ],
+  "seed": 42
+}

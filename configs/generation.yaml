@@ -1,0 +1,10 @@
+baseline:
+  do_sample: false
+  num_beams: 1
+  temperature: null
+  top_p: null
+  max_new_tokens: 512
+  batch_size: 8
+  qwen3_enable_thinking: false
+  resume: true
+  seed: 42

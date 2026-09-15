@@ -1,0 +1,3 @@
+baseline	candidate	metric	direction	analysis_level	status	skip_reason	paired_rows	baseline_score	candidate_score	delta_candidate_minus_baseline	baseline_ci_95_lower	baseline_ci_95_upper	candidate_ci_95_lower	candidate_ci_95_upper	delta_ci_95_lower	delta_ci_95_upper	valid_bootstrap_samples
+P5_GRPO_A2	P5_GRPO_A5	mtld	higher_is_better	corpus	ok		2000	131.26916956128224	133.58568676312507	2.316517201842828	125.23373866660742	134.53678145071967	126.68760024712739	136.3573341716092	-1.226806015004945	4.5008819826119035	1000
+P5_GRPO_A2	P5_GRPO_A5	mattr_50	higher_is_better	corpus	ok		2000	0.8376036866359297	0.8398202510104066	0.002216564374476926	0.8338573920498806	0.8405874934334762	0.8357324744969162	0.8424835701973742	0.0005991327238470013	0.0034142452545547724	1000

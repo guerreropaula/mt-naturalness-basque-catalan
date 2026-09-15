@@ -1,0 +1,89 @@
+sft:
+  data_dir: data/training
+  adapter_root: models/p4_sft
+  results_root: results/p4_sft
+  target_languages:
+    en_eu: eu
+    en_ca: ca
+
+  chat_format:
+    directory: chat
+    max_seq_length: 512
+    enable_thinking: false
+    prompt_spec:
+      label: p4_p5_direct_translation
+      single_user_prompt_template: |-
+        Translate the following English text into {target_lang}. Return only the translation.
+
+        {source}
+
+  # 4-bit QLoRA.
+  quantization:
+    load_in_4bit: true
+    bnb_4bit_quant_type: nf4
+    bnb_4bit_use_double_quant: true
+
+  lora:
+    r: 64
+    lora_alpha: 128
+    lora_dropout: 0.05
+    bias: none
+    task_type: CAUSAL_LM
+    target_modules:
+      - q_proj
+      - k_proj
+      - v_proj
+      - o_proj
+      - gate_proj
+      - up_proj
+      - down_proj
+
+  model_overrides:
+    latxa_70b_instruct:
+      quantization:
+        # FSDP can shard 4-bit weights when their storage dtype is floating point.
+        bnb_4bit_quant_storage: bfloat16
+      lora:
+        # Keep the 828M adapter parameters in the QLoRA compute dtype before sharding.
+        autocast_adapter_dtype: false
+      training:
+        required_world_size: 4
+        distributed_timeout_minutes: 30
+        gradient_accumulation_steps: 4
+        # bitsandbytes optimizer state cannot be gathered reliably by FSDP1.
+        save_only_model: true
+        load_best_model_at_end: false
+
+  training:
+    seed: 42
+    num_train_epochs: 1
+    per_device_train_batch_size: 1
+    per_device_eval_batch_size: 2
+    effective_batch_size: 16
+    gradient_accumulation_steps: 16
+    learning_rate: 5.0e-5
+    weight_decay: 0.0
+    warmup_ratio: 0.10
+    lr_scheduler_type: linear
+    optim: adamw_bnb_8bit
+    packing: true
+    logging_steps: 10
+    eval_strategy: steps
+    eval_steps: 250
+    save_strategy: steps
+    save_steps: 250
+    save_total_limit: 2
+    gradient_checkpointing: true
+    gradient_checkpointing_kwargs:
+      use_reentrant: false
+    bf16: true
+    tf32: true
+
+  evaluation:
+    batch_size: 4
+    vllm_batch_size: 128
+    max_new_tokens: 512
+    do_sample: false
+    num_beams: 1
+    temperature: null
+    top_p: null

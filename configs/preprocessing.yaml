@@ -1,0 +1,46 @@
+normalization:
+  unicode_form: NFC
+  replace_nbsp: true
+  remove_zero_width_spaces: true
+  collapse_whitespace: true
+  strip_edges: true
+
+text_filtering:
+  min_chars: 1
+  max_chars: 2000
+  require_alphabetic: true
+
+language_id:
+  model_path: data/resources/lid.176.ftz
+  confidence_threshold: 0.80
+
+domain_filtering:
+  enabled: true
+  corpus_ids:
+    - ca_en
+  column: domain
+  allowed_values:
+    - HRM
+    - CUL
+
+length_filtering:
+  min_tokens: 3
+  max_tokens: 250
+  min_token_ratio: 0.25
+  max_token_ratio: 4.0
+  min_char_ratio: 0.25
+  max_char_ratio: 4.0
+
+splits:
+  train_size: 100000
+  # Held-out final evaluation.
+  test_size: 2000
+  # Prompt and model development.
+  dev_size: 2000
+  # Target-side LFP background, disjoint from all other splits.
+  lfp_background_size: 70000
+  # Replaces lower-priority split rows removed by cross-split de-duplication.
+  evaluation_reserve_size: 16
+
+output:
+  processed_dir: data/processed

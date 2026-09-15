@@ -1,0 +1,79 @@
+[project]
+name = "naturalness-and-translationese-thesis"
+version = "1.0.0"
+description = "Reproducibility code for naturalness and translationese in LLM-based English-to-Basque and English-to-Catalan MT"
+requires-python = ">=3.11"
+readme = "README.md"
+license = {file = "LICENSE"}
+authors = [{name = "Paula Guerrero Castello"}]
+dependencies = [
+    "pyyaml>=6.0",
+    "numpy>=1.26",
+    "pandas>=2.2",
+    "sacrebleu>=2.6",
+    "lexical-diversity>=0.1.1",
+    "setuptools<82",
+]
+
+[project.optional-dependencies]
+data = [
+    "datasets>=2.19",
+    "fasttext-wheel>=0.9.2",
+    "unbabel-comet>=2.2.7",
+    "tqdm>=4.66",
+]
+inference = [
+    "transformers>=4.57,<5",
+    "torch>=2.10",
+    "accelerate>=1.13",
+    "sentencepiece>=0.2",
+    "vllm>=0.19.1",
+]
+training = [
+    "datasets>=2.19",
+    "transformers>=4.57,<5",
+    "torch>=2.10",
+    "accelerate>=1.13",
+    "peft>=0.15",
+    "bitsandbytes>=0.45",
+    "sentencepiece>=0.2",
+]
+grpo = [
+    "datasets>=2.19",
+    "transformers>=4.57,<5",
+    "torch>=2.10",
+    "accelerate>=1.13",
+    "peft>=0.15",
+    "bitsandbytes>=0.45",
+    "sentencepiece>=0.2",
+    "trl>=0.19,<0.20",
+    "unbabel-comet>=2.2.7",
+]
+evaluation = [
+    "transformers>=4.57,<5",
+    "torch>=2.10",
+    "unbabel-comet>=2.2.7",
+    "stanza>=1.13",
+]
+astred = [
+    "astred==0.9.7",
+    "awesome-align==0.1.7",
+    "stanza>=1.13",
+    "nltk>=3.10",
+]
+dev = [
+    "ruff>=0.5",
+]
+
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["src*"]
+
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"

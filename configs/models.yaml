@@ -1,0 +1,78 @@
+defaults:
+  backend: vllm
+  dtype: bf16
+  quantization: null
+  max_context_length: 8192
+  tensor_parallel_size: 1
+  chat_template_options: {}
+  prompt_adapter: chat
+  enable_thinking: false
+  gated: false
+
+models:
+
+  latxa_8b_instruct:
+    hf_id: HiTZ/Latxa-Llama-3.1-8B-Instruct
+    family: llama3
+    parameter_scale: 8B
+    instruction_tuned: true
+    comparison_group: main_7_8b
+    gated: false
+
+  qwen3_8b:
+    hf_id: Qwen/Qwen3-8B
+    family: qwen3
+    parameter_scale: 8B
+    instruction_tuned: true
+    comparison_group: main_7_8b
+    enable_thinking: false
+
+  salamandrata_7b_instruct:
+    hf_id: BSC-LT/salamandraTA-7b-instruct
+    family: salamandra
+    parameter_scale: 7B
+    instruction_tuned: true
+    comparison_group: main_7_8b
+    prompt_adapter: salamandrata_translation
+
+  salamandra_7b_instruct:
+    hf_id: BSC-LT/salamandra-7b-instruct
+    family: salamandra
+    parameter_scale: 7B
+    instruction_tuned: true
+    comparison_group: main_7_8b
+
+  gemma3_12b_it:
+    hf_id: google/gemma-3-12b-it
+    family: gemma3
+    parameter_scale: 12B
+    instruction_tuned: true
+    comparison_group: secondary_medium_baseline
+    gated: true
+
+  latxa_70b_instruct:
+    hf_id: HiTZ/Latxa-Llama-3.1-70B-Instruct
+    family: llama3
+    parameter_scale: 70B
+    instruction_tuned: true
+    comparison_group: large_matched
+    gated: false
+    tensor_parallel_size: 4
+
+  qwen3_32b:
+    hf_id: Qwen/Qwen3-32B
+    family: qwen3
+    parameter_scale: 32B
+    instruction_tuned: true
+    comparison_group: intermediate_baseline
+    enable_thinking: false
+    tensor_parallel_size: 2
+
+  gemma3_27b_it:
+    hf_id: google/gemma-3-27b-it
+    family: gemma3
+    parameter_scale: 27B
+    instruction_tuned: true
+    comparison_group: intermediate_baseline
+    gated: true
+    tensor_parallel_size: 2

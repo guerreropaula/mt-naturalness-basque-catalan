@@ -1,0 +1,37 @@
+classifier:
+  output_dir: data/classifiers
+  source_pairs_dir: data/classifier_source_pairs
+  results_dir: results/classifiers
+  size_modes:
+    matched:
+      train_pairs: 66000
+      dev_pairs: 2000
+      test_pairs: 2000
+  backbones:
+    en_eu: ixa-ehu/berteus-base-cased
+    en_ca: BSC-LT/RoBERTa-ca
+  negative_generation:
+    model_keys:
+      - latxa_8b_instruct
+      - qwen3_8b
+      - gemma3_12b_it
+      - salamandrata_7b_instruct
+    max_attempts: 2
+  positive_quality_filter:
+    en_ca:
+      enabled: true
+      model: Unbabel/wmt23-cometkiwi-da-xl
+      threshold: 0.70
+      batch_size: 16
+      candidate_batch_size: 4096
+      gpus: 1
+      progress_bar: false
+  training:
+    max_length: 256
+    batch_size: 32
+    eval_batch_size: 64
+    learning_rate: 2.0e-5
+    weight_decay: 0.01
+    warmup_ratio: 0.1
+    epochs: 3
+    seed: 42

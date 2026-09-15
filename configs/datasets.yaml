@@ -1,0 +1,69 @@
+datasets:
+  en_eu:
+    name: EHU-HAC
+    source_lang: en
+    target_lang: eu
+    corpus_id: ehuhac
+    loader: ehu_hac
+    paths:
+      root_dir: data/raw/ehu_hac
+      source_file: EhuHac.en-eu.en
+      target_file: EhuHac.en-eu.eu
+
+  en_ca:
+    name: CA-EN Parallel Corpus
+    source_lang: en
+    target_lang: ca
+    corpus_id: ca_en
+    loader: hf_dataset
+    hf_repo_id: projecte-aina/CA-EN_Parallel_Corpus
+    split: train
+    column_mapping:
+      source: en
+      target: ca
+    metadata_mapping:
+      domain: Domain
+      type: Type
+      corpus_alignment: alignment
+
+  flores_plus_en_ca:
+    name: FLORES+ EN-CA
+    source_lang: en
+    target_lang: ca
+    corpus_id: flores_plus_en_ca
+    loader: hf_dataset
+    hf_repo_id: openlanguagedata/flores_plus
+    split: devtest
+    column_mapping:
+      source: eng_Latn
+      target: cat_Latn
+
+  flores_plus_en_eu:
+    name: FLORES+ EN-EU
+    source_lang: en
+    target_lang: eu
+    corpus_id: flores_plus_en_eu
+    loader: hf_dataset
+    hf_repo_id: openlanguagedata/flores_plus
+    split: devtest
+    column_mapping:
+      source: eng_Latn
+      target: eus_Latn
+
+  macocu_news_en_ca:
+    name: MaCoCu EN-CA News External Test
+    source_lang: en
+    target_lang: ca
+    corpus_id: macocu_news_en_ca
+    loader: local_jsonl
+    paths:
+      file: data/external/macocu_news_en_ca/test.jsonl
+
+  berria_news_en_eu:
+    name: Berria EN-EU News External Test
+    source_lang: en
+    target_lang: eu
+    corpus_id: berria_news_en_eu
+    loader: local_jsonl
+    paths:
+      file: data/external/berria_news_en_eu/test.jsonl

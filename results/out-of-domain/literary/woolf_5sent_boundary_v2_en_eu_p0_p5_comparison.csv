@@ -1,0 +1,76 @@
+Metric group,Metric,Direction,Reference score,latxa_8b_instruct | P5 GRPO A2 translation score,latxa_8b_instruct | P5 GRPO A3v2 translation score,latxa_8b_instruct | P5 GRPO A3v5 translation score
+Adequacy,bleu,higher is better,,10.211972424728671,10.06600711947473,10.49565954610337
+Adequacy,chrf pp,higher is better,,46.90322340295821,46.023563570546294,47.64202571576716
+Adequacy,comet,higher is better,,0.78480447691679,0.7777526356577873,0.785972298681736
+Adequacy,comet qe,higher is better,0.5098083000779152,0.584060641258955,0.5681159612815827,0.580976432621479
+Adequacy,cometkiwi,higher is better,0.5098083000779152,0.584060641258955,0.5681159612815827,0.580976432621479
+Adequacy,metricx,lower is better,,7.703855276107788,7.941207766532898,7.9220207133293155
+Adequacy,ter,lower is better,,93.41506310780053,93.21073867163253,90.30881440099317
+Adequacy,xcomet,higher is better,,0.4382133855614811,0.4245405305258464,0.43626904628798363
+Astred,aligned source ratio,,,0.7641434158182417,0.7596632526225435,0.7810862833515652
+Astred,aligned target ratio,,,0.8632685619893128,0.864597235292428,0.8600201609221164
+Astred,aligned word pairs,,,24.456492443934543,23.71131267918884,24.93237474629946
+Astred,rows eligible,,,357.0,330.0,361.0
+Astred,rows excluded sentence count mismatch,,,143.0,170.0,139.0
+Astred,rows failed,,,0.0,0.0,0.0
+Astred,rows scored,,,357.0,330.0,361.0
+Astred,rows scored multisentence,,,357.0,330.0,361.0
+Astred,rows total,,,500.0,500.0,500.0
+Astred,sacr cross,lower means closer to reference structure,,30.450795033653304,27.526801348819518,30.714119673470396
+Astred,sentence pairs scored,,,1785.0,1650.0,1806.0
+Astred,seq cross,lower means closer to reference structure,,25.639992156171527,23.153921954760783,25.534445740670982
+Astred,ted,lower means closer to reference structure,,23.138863579516435,22.55193358167536,23.10914874835415
+Astred,word cross,lower means closer to reference structure,,38.92960302748506,35.91413077804996,39.40032632741932
+Astred Source Prediction,aligned source ratio,,,0.691106089556004,0.6968223688057001,0.6902096526425506
+Astred Source Prediction,aligned target ratio,,,0.7089786108718652,0.709445682653248,0.7235702283902127
+Astred Source Prediction,aligned word pairs,,,24.05556403470295,23.506063680967692,24.70464361706703
+Astred Source Prediction,rows eligible,,,358.0,331.0,361.0
+Astred Source Prediction,rows excluded sentence count mismatch,,,142.0,169.0,139.0
+Astred Source Prediction,rows failed,,,0.0,0.0,0.0
+Astred Source Prediction,rows scored,,,358.0,331.0,361.0
+Astred Source Prediction,rows scored multisentence,,,358.0,331.0,361.0
+Astred Source Prediction,rows total,,,500.0,500.0,500.0
+Astred Source Prediction,sacr cross,lower means closer to source structure,,28.7867328755993,25.790714675017448,30.00742725437322
+Astred Source Prediction,sentence pairs scored,,,1790.0,1655.0,1805.0
+Astred Source Prediction,seq cross,lower means closer to source structure,,26.428799015025323,23.605507742897952,27.44317715464435
+Astred Source Prediction,ted,lower means closer to source structure,,27.17152210783733,26.43990965837025,27.534723596811393
+Astred Source Prediction,word cross,lower means closer to source structure,,32.44757650673257,29.229328496250545,33.62126114991479
+Astred Source Reference,aligned source ratio,,0.6546881041831585,,,
+Astred Source Reference,aligned target ratio,,0.7580877178852227,,,
+Astred Source Reference,aligned word pairs,,25.012128858187893,,,
+Astred Source Reference,rows eligible,,498.0,,,
+Astred Source Reference,rows excluded sentence count mismatch,,2.0,,,
+Astred Source Reference,rows failed,,0.0,,,
+Astred Source Reference,rows scored,,498.0,,,
+Astred Source Reference,rows scored multisentence,,498.0,,,
+Astred Source Reference,rows total,,500.0,,,
+Astred Source Reference,sacr cross,human reference structural distance from source; comparison baseline,29.179202494338263,,,
+Astred Source Reference,sentence pairs scored,,2490.0,,,
+Astred Source Reference,seq cross,human reference structural distance from source; comparison baseline,26.76464411496912,,,
+Astred Source Reference,ted,human reference structural distance from source; comparison baseline,28.23180771811966,,,
+Astred Source Reference,word cross,human reference structural distance from source; comparison baseline,32.25047483316305,,,
+Classifier Reference Likeness,five sentence v2,higher means more reference-like according to the named classifier,0.9292509399916162,0.1317015274460864,0.12955520374701882,0.7656646663367864
+Classifier Reference Likeness,sentence v3,higher means more reference-like according to the named classifier,0.9662590992879122,0.08245883578318171,0.09597361793986056,0.6831223748690681
+Frequency Profile Reference,text count,,,70000.0,70000.0,70000.0
+Lexical Diversity,mattr 50,closer to reference is better,0.8837418389201783,0.8148503126311221,0.8254944954755385,0.8496424633799932
+Lexical Diversity,mtld,closer to reference is better,300.9872034781255,104.6852192626874,125.1941990555789,170.50886943364648
+Lexical Diversity,token count,closer to reference is better,38800.0,45310.0,43922.0,44492.0
+Lexical Diversity,ttr,closer to reference is better,0.23652061855670103,0.17391304347826086,0.17480989026000637,0.18499955048098535
+Lexical Diversity,type count,closer to reference is better,9177.0,7880.0,7678.0,8231.0
+Lexical Diversity,yules i,closer to reference is better,208.09339321722584,143.90523377249863,153.06071786457545,180.05530115546074
+Lexical Diversity,yules k,closer to reference is better,48.05534594537145,69.49017584592586,65.33354958420989,55.53849253994441
+Lexical Frequency Profile,b1 top 1000,closer to reference is better,0.573840206185567,0.663738689031119,0.6588953144210191,0.6518025712487638
+Lexical Frequency Profile,b2 1001 2000,closer to reference is better,0.0818041237113402,0.071882586625469,0.0737443650107008,0.07484491593994426
+Lexical Frequency Profile,b3 beyond 2000,closer to reference is better,0.34435567010309276,0.26437872434341203,0.26736032056828013,0.2733525128112919
+Morphological Diversity,morph inverse simpson optional,closer to reference is better,2.6083123383432474,2.5828848162225326,2.536154941483763,2.5708947438703693
+Morphological Diversity,morph shannon entropy,closer to reference is better,0.9830098090814046,0.9797552345328565,0.9661361264856777,0.9782893702026018
+Morphological Diversity,morph simpson d,closer to reference is better,0.44109892192157085,0.4459235377614504,0.45020314982522724,0.44557978562365064
+Overall,row count,,,500.0,500.0,500.0
+Sentence Boundary Contract,expected count,,,5.0,5.0,5.0
+Sentence Boundary Contract,invalid outputs,,,48.0,136.0,12.0
+Sentence Boundary Contract,rows total,,,500.0,500.0,500.0
+Sentence Boundary Contract,valid outputs,,,452.0,364.0,488.0
+Sentence Boundary Contract,valid ratio,,,0.904,0.728,0.976
+Synonym Frequency Analysis,sfa cdu,closer to reference is better,0.33739093193231406,0.3366069122395307,0.33513714994452465,0.33480103705615294
+Synonym Frequency Analysis,sfa ptf,closer to reference is better,0.9122636940270076,0.9103413965151793,0.9104190253887804,0.9083968288163076
+Synonym Frequency Analysis,sfa syn ttr,closer to reference is better,0.0885831004085143,0.07374454615450424,0.0728482470357417,0.07464074387151311
