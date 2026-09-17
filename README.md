@@ -83,7 +83,7 @@ BLEU, chrF++, TER, COMET, XCOMET, COMETKiwi, and MetricX-24.
 configs/                   Experiment, dataset, model, SFT, GRPO, and naturalness estimators settings
 results/                   In-domain, out-of-domain, and statistical results
 src/data/                  Corpus preprocessing and split construction
-src/prompting/             P0–P3 prompting experiments
+src/prompting/run.py      Shared P0–P3 prompting runner
 src/sft/                   P4 data preparation, training, and evaluation
 src/grpo/                  P5 rewards, training, ablations, and evaluation
 src/classifiers/           Binary HT-vs-MT naturalness classifiers
@@ -92,7 +92,7 @@ src/evaluation/run.py      Translation quality and naturalness evaluation
 src/evaluation/metrics/    Automatic, lexical, morphological, and syntactic metrics
 src/evaluation/statistics/ Paired significance tests and corpus-level bootstrap
 src/evaluation/compare.py  Aggregate P0–P5 comparison tables
-src/utils/                 Shared configuration  and model-loading utilities
+src/utils/                 Shared configuration, errors, and model-loading utilities
 ```
 
 ## Installation
@@ -140,10 +140,10 @@ python -m src.data.build_training_splits --dataset all --force
 ### Prompting (P0–P3)
 
 ```bash
-python -m src.prompting.p0.run --dataset en_eu --model latxa_8b_instruct --split test
-python -m src.prompting.p1.run --dataset en_eu --model latxa_8b_instruct --split test
-python -m src.prompting.p2.run --dataset en_eu --model latxa_8b_instruct --split test
-python -m src.prompting.p3.run --dataset en_eu --model latxa_8b_instruct --split test
+python -m src.prompting.run --experiment p0 --dataset en_eu --model latxa_8b_instruct
+python -m src.prompting.run --experiment p1 --dataset en_eu --model latxa_8b_instruct
+python -m src.prompting.run --experiment p2 --dataset en_eu --model latxa_8b_instruct
+python -m src.prompting.run --experiment p3 --dataset en_eu --model latxa_8b_instruct
 ```
 
 P0–P3 evaluation is deterministic (`do_sample: false`, single beam).

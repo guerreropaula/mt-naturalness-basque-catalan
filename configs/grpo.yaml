@@ -8,6 +8,10 @@ grpo:
   target_languages:
     en_ca: ca
     en_eu: eu
+  supported_models:
+    - latxa_8b_instruct
+    - salamandrata_7b_instruct
+
 
   chat_format:
     enable_thinking: false
@@ -18,7 +22,6 @@ grpo:
 
         {source}
 
-  # Must match the P4 adapter.
   lora:
     r: 64
     lora_alpha: 128
@@ -31,15 +34,14 @@ grpo:
       batch_size: 4
       gpus: 1
     comet:
-      # Reference-based COMET used only by A5, the paper-comparison condition.
+      # Reference-based COMET used only by A5, the paper comparison condition.
       model: Unbabel/wmt22-comet-da
       batch_size: 4
       gpus: 1
-    # Validity gate for EOS-only completions; the weighted reward applies to
-    # every non-empty translation exactly as specified for each ablation.
+    # Validity gate for EOS-only completions; the weighted reward applies to every non-empty translation exactly as specified for each ablation.
     empty_candidate_reward: -1.0
     classifier:
-      # Used by A3.
+      # Classifier reward used by A3
       model_dirs:
         en_ca: results/classifiers/en_ca/reference_likeness_v1/best_model
         en_eu: results/classifiers/en_eu/reference_likeness_v1/best_model
@@ -133,39 +135,6 @@ grpo:
           self_bleu: 0.20
           length: 0.10
 
-  model_overrides:
-    latxa_70b_instruct:
-      lora:
-        autocast_adapter_dtype: false
-      reward:
-        # Keep the reward model off the four GPUs shared by FSDP and vLLM.
-        cometkiwi:
-          gpus: 0
-      training:
-        # FSDP and colocated vLLM share the same four-GPU allocation.
-        required_world_size: 4
-        required_cuda_devices: 4
-        required_model_devices: 0
-        save_only_model: true
-        gradient_accumulation_steps: 32
-        use_vllm: true
-        vllm_mode: colocate
-        vllm_native_lora: true
-        vllm_tensor_parallel_size: 4
-        vllm_gpu_memory_utilization: 0.90
-        vllm_model_kwargs:
-          dtype: bfloat16
-          max_num_seqs: 16
-          enforce_eager: true
-          enable_sleep_mode: true
-          kv_cache_memory_bytes: 268435456
-          enable_lora: true
-          max_loras: 1
-          max_cpu_loras: 1
-          max_lora_rank: 64
-          fully_sharded_loras: true
-          disable_custom_all_reduce: true
-
   training:
     seed: 42
     num_train_epochs: 1
@@ -176,8 +145,8 @@ grpo:
     # completions with G=8 gives 16 distinct source prompts per update.
     gradient_accumulation_steps: 128
     effective_prompt_batch_size: 16
-    # Keep each rollout generation batch at the previous memory-safe size:
-    # 16 completions = 2 source prompts x G=8.
+    # Each rollout batch contains 2 prompts and 16 completions:
+    # 2 source prompts x G=8.
     generation_batch_size: 16
     learning_rate: 5.0e-6
     weight_decay: 0.0
@@ -198,7 +167,7 @@ grpo:
       use_reentrant: false
     bf16: true
     tf32: true
-    # P5 samples with the training model's Transformers generation path.
+    # Rollouts use Transformers generation.
     use_vllm: false
     num_generations: 8
     # P5 uses a 512-token total generation window: 256 prompt + 256 completion.

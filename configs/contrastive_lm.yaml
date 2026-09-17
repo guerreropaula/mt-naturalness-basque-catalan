@@ -1,5 +1,5 @@
 contrastive_lm:
-  # The same SFT-hard-negative chunk dataset used by the new classifier.
+  # Five-sentence SFT-hard-negative chunks shared with classifier v2.
   data_root: data/classifier_chunks/sft5
   adapter_root: models/contrastive_lm
   results_root: results/contrastive_lm

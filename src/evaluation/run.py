@@ -8,38 +8,34 @@ import logging
 import time
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 import pandas as pd
 
 from src.evaluation.metrics.astred import (
-    ASTrEDAnalysisError,
     compute_astred_metrics,
     empty_astred_summary,
-)
-from src.evaluation.metrics.automatic import (
-    compute_automatic_metrics,
-    compute_per_example_metrics,
-    compute_target_lexical_metrics,
 )
 from src.evaluation.metrics.automatic import (
     DEFAULT_COMETKIWI_MODEL,
     DEFAULT_METRICX_MODEL,
     DEFAULT_XCOMET_XXL_MODEL,
+    compute_automatic_metrics,
+    compute_per_example_metrics,
+    compute_target_lexical_metrics,
+)
+from src.evaluation.metrics.linguistic import (
+    annotate_texts,
+    compute_stanza_summary_metrics,
 )
 from src.evaluation.metrics.synonyms import (
-    SFAAnalysisError,
     collect_sfa_option_counts,
     empty_sfa_summary,
     load_apertium_translation_options,
     resolve_default_apertium_dictionary,
     summarize_sfa_metrics,
 )
-from src.evaluation.metrics.linguistic import (
-    StanzaAnalysisError,
-    annotate_texts,
-    compute_stanza_summary_metrics,
-)
+from src.utils.errors import PipelineError
 from src.utils.io import save_dataframe_csv, save_dataframe_jsonl, save_json
 
 logger = logging.getLogger(__name__)
@@ -58,19 +54,15 @@ _ASTRED_COLUMNS = (
     "astred_status",
 )
 _ASTRED_SOURCE_PREDICTION_COLUMNS = tuple(
-    column.replace("astred_", "astred_source_prediction_", 1)
-    for column in _ASTRED_COLUMNS
+    column.replace("astred_", "astred_source_prediction_", 1) for column in _ASTRED_COLUMNS
 )
 _ASTRED_SOURCE_REFERENCE_COLUMNS = tuple(
-    column.replace("astred_", "astred_source_reference_", 1)
-    for column in _ASTRED_COLUMNS
+    column.replace("astred_", "astred_source_reference_", 1) for column in _ASTRED_COLUMNS
 )
 
 
-def _rename_astred_columns(
-    per_example: pd.DataFrame, *, prefix: str
-) -> pd.DataFrame:
-    """Give a second ASTrED pass an unambiguous, non-overlapping schema."""
+def _rename_astred_columns(per_example: pd.DataFrame, *, prefix: str) -> pd.DataFrame:
+    """Prefix columns from an additional ASTrED comparison."""
     return per_example.rename(
         columns={column: column.replace("astred_", prefix, 1) for column in _ASTRED_COLUMNS}
     )
@@ -192,18 +184,14 @@ def _analysis_metadata(
             "astred_source_prediction_target_model_or_lang": (
                 args.astred_source_prediction_target_model_or_lang
             ),
-            "astred_source_prediction_source_column": (
-                args.astred_source_prediction_source_column
-            ),
-            "astred_source_prediction_target_column": (
-                args.astred_source_prediction_target_column
-            ),
+            "astred_source_prediction_source_column": (args.astred_source_prediction_source_column),
+            "astred_source_prediction_target_column": (args.astred_source_prediction_target_column),
         },
     }
 
 
 def load_predictions(path: str | Path) -> pd.DataFrame:
-    """Load baseline predictions from JSONL or Parquet."""
+    """Load predictions from JSONL or Parquet."""
     predictions_path = Path(path)
     if not predictions_path.exists():
         raise FileNotFoundError(f"Predictions file not found: {predictions_path}")
@@ -247,7 +235,6 @@ def _flatten_summary(summary: dict[str, Any]) -> pd.DataFrame:
     return pd.DataFrame(rows)
 
 
-
 def _empty_morphological_diversity() -> dict[str, float | int | None]:
     return {
         "morph_shannon_entropy": None,
@@ -274,6 +261,78 @@ _MORPHOLOGICAL_DIVERSITY_KEYS = frozenset(
 def _split_lexical_metrics(metrics: dict[str, Any]) -> tuple[dict[str, Any], dict[str, Any]]:
     result = dict(metrics)
     return result, result.pop("lexical_frequency_profile")
+
+
+def _optional_metric(label: str, compute: Callable[[], Any]) -> Any | None:
+    """Return None when an optional metric cannot be computed."""
+    try:
+        return compute()
+    except (KeyError, PipelineError, ValueError) as exc:
+        logger.warning("Skipping %s: %s", label, exc)
+        return None
+
+
+def _compute_morphology(
+    reference_texts: list[str], prediction_texts: list[str], language: str
+) -> tuple[dict[str, list[list[dict[str, Any]]]], dict[str, dict[str, Any]]]:
+    annotations = {
+        "reference": annotate_texts(reference_texts, lang=language),
+        "prediction": annotate_texts(prediction_texts, lang=language),
+    }
+    summaries = {
+        role: {
+            key: value
+            for key, value in compute_stanza_summary_metrics(role_annotations).items()
+            if key in _MORPHOLOGICAL_DIVERSITY_KEYS
+        }
+        for role, role_annotations in annotations.items()
+    }
+    return annotations, summaries
+
+
+def _compute_sfa(
+    predictions_df: pd.DataFrame,
+    reference_texts: list[str],
+    prediction_texts: list[str],
+    source_language: str,
+    target_language: str,
+    dictionary_path: str | Path | None,
+    dictionary_invert: bool | None,
+    target_annotations: dict[str, list[list[dict[str, Any]]]],
+    annotation_language: str | None,
+) -> dict[str, dict[str, Any]]:
+    dictionary = (
+        {"path": Path(dictionary_path), "invert": bool(dictionary_invert), "resource": "custom"}
+        if dictionary_path is not None
+        else resolve_default_apertium_dictionary(target_language)
+    )
+    if dictionary_invert is not None:
+        dictionary["invert"] = bool(dictionary_invert)
+    options = load_apertium_translation_options(
+        dictionary["path"], invert=bool(dictionary["invert"])
+    )
+    source_annotations = annotate_texts(
+        predictions_df["source"].fillna("").astype(str).tolist(), lang=source_language
+    )
+    if not target_annotations or annotation_language != target_language:
+        target_annotations = {
+            "reference": annotate_texts(reference_texts, lang=target_language),
+            "prediction": annotate_texts(prediction_texts, lang=target_language),
+        }
+
+    summaries = {}
+    for role in ("reference", "prediction"):
+        counts = collect_sfa_option_counts(source_annotations, target_annotations[role], options)
+        role_summary = summarize_sfa_metrics(
+            counts["counts_by_source_lemma"],
+            sentences_with_candidates=int(counts["sentences_with_candidates"]),
+            dictionary_path=dictionary["path"],
+            dictionary_resource=dictionary.get("resource"),
+            dictionary_inverted=bool(dictionary["invert"]),
+        )
+        role_summary["dictionary_entries"] = len(options)
+        summaries[role] = role_summary
+    return summaries
 
 
 def analyze_predictions(
@@ -303,7 +362,7 @@ def analyze_predictions(
     astred_source_prediction_alignment_column: str | None = None,
     astred_source_reference: bool = False,
 ) -> dict[str, Any]:
-    """Compute adequacy plus matched target-side naturalness metrics."""
+    """Compute translation-quality and target-side naturalness metrics."""
     if "reference" not in predictions_df:
         raise ValueError("Naturalness analysis requires a reference target column.")
 
@@ -331,7 +390,9 @@ def analyze_predictions(
         comet_gpus=comet_gpus,
     )
     if "sentence_boundary_contract_valid" in predictions_df:
-        contract_values = predictions_df["sentence_boundary_contract_valid"].fillna(False).astype(bool)
+        contract_values = (
+            predictions_df["sentence_boundary_contract_valid"].fillna(False).astype(bool)
+        )
         valid_outputs = int(contract_values.sum())
         expected_counts = predictions_df.get("sentence_boundary_count")
         expected_count = None
@@ -375,94 +436,60 @@ def analyze_predictions(
 
     target_annotations: dict[str, list[list[dict[str, Any]]]] = {}
     if stanza_lang:
-        try:
-            target_annotations = {
-                "reference": annotate_texts(reference_texts, lang=stanza_lang),
-                "prediction": annotate_texts(prediction_texts, lang=stanza_lang),
-            }
-            summary["reference_morphological_diversity"] = {
-                key: value
-                for key, value in compute_stanza_summary_metrics(
-                    target_annotations["reference"]
-                ).items()
-                if key in _MORPHOLOGICAL_DIVERSITY_KEYS
-            }
-            summary["prediction_morphological_diversity"] = {
-                key: value
-                for key, value in compute_stanza_summary_metrics(
-                    target_annotations["prediction"]
-                ).items()
-                if key in _MORPHOLOGICAL_DIVERSITY_KEYS
-            }
-        except StanzaAnalysisError as exc:
-            logger.warning("Skipping Stanza morphology: %s", exc)
+        morphology = _optional_metric(
+            "Stanza morphology",
+            lambda: _compute_morphology(reference_texts, prediction_texts, stanza_lang),
+        )
+        if morphology is not None:
+            target_annotations, morphology_summaries = morphology
+            for role, role_summary in morphology_summaries.items():
+                summary[f"{role}_morphological_diversity"] = role_summary
 
     if sfa_target_lang:
-        try:
-            dictionary_spec = (
-                {
-                    "path": Path(sfa_dictionary_path),
-                    "invert": bool(sfa_dictionary_invert),
-                    "resource": "custom",
-                }
-                if sfa_dictionary_path is not None
-                else resolve_default_apertium_dictionary(sfa_target_lang)
-            )
-            if sfa_dictionary_invert is not None:
-                dictionary_spec["invert"] = bool(sfa_dictionary_invert)
-            translation_options = load_apertium_translation_options(
-                dictionary_spec["path"], invert=bool(dictionary_spec["invert"])
-            )
-            source_annotations = annotate_texts(
-                predictions_df["source"].fillna("").astype(str).tolist(), lang=sfa_source_lang
-            )
-            if not target_annotations or stanza_lang != sfa_target_lang:
-                target_annotations = {
-                    "reference": annotate_texts(reference_texts, lang=sfa_target_lang),
-                    "prediction": annotate_texts(prediction_texts, lang=sfa_target_lang),
-                }
-            for role in ("reference", "prediction"):
-                counts = collect_sfa_option_counts(
-                    source_annotations, target_annotations[role], translation_options
-                )
-                sfa_summary = summarize_sfa_metrics(
-                    counts["counts_by_source_lemma"],
-                    sentences_with_candidates=int(counts["sentences_with_candidates"]),
-                    dictionary_path=dictionary_spec["path"],
-                    dictionary_resource=dictionary_spec.get("resource"),
-                    dictionary_inverted=bool(dictionary_spec["invert"]),
-                )
-                sfa_summary["dictionary_entries"] = len(translation_options)
-                summary[f"{role}_synonym_frequency_analysis"] = sfa_summary
-        except (KeyError, SFAAnalysisError, StanzaAnalysisError, ValueError) as exc:
-            logger.warning("Skipping SFA metrics: %s", exc)
+        sfa_summaries = _optional_metric(
+            "SFA metrics",
+            lambda: _compute_sfa(
+                predictions_df,
+                reference_texts,
+                prediction_texts,
+                sfa_source_lang,
+                sfa_target_lang,
+                sfa_dictionary_path,
+                sfa_dictionary_invert,
+                target_annotations,
+                stanza_lang,
+            ),
+        )
+        if sfa_summaries is not None:
+            for role, role_summary in sfa_summaries.items():
+                summary[f"{role}_synonym_frequency_analysis"] = role_summary
 
     if astred_model_or_lang:
-        try:
-            astred_result = compute_astred_metrics(
+        result = _optional_metric(
+            "ASTrED metrics",
+            lambda: compute_astred_metrics(
                 predictions_df,
                 source_model_or_lang=astred_model_or_lang,
                 parser=astred_parser,
                 source_column=astred_source_column,
                 target_column=astred_target_column,
                 alignment_column=astred_alignment_column,
-            )
-            per_example = per_example.join(astred_result["per_example"])
-            summary["astred"] = astred_result["summary"]
-        except (ASTrEDAnalysisError, ValueError) as exc:
-            logger.warning("Skipping ASTrED metrics: %s", exc)
+            ),
+        )
+        if result is not None:
+            per_example = per_example.join(result["per_example"])
+            summary["astred"] = result["summary"]
+
+    target_model_or_lang = astred_source_prediction_target_model_or_lang or astred_model_or_lang
+    if (astred_source_prediction or astred_source_reference) and not target_model_or_lang:
+        raise ValueError(
+            "Source-side ASTrED requires --astred-source-prediction-target-model-or-lang."
+        )
 
     if astred_source_prediction:
-        target_model_or_lang = (
-            astred_source_prediction_target_model_or_lang or astred_model_or_lang
-        )
-        if not target_model_or_lang:
-            raise ValueError(
-                "Source-to-prediction ASTrED requires "
-                "--astred-source-prediction-target-model-or-lang."
-            )
-        try:
-            source_prediction_result = compute_astred_metrics(
+        result = _optional_metric(
+            "source-to-prediction ASTrED metrics",
+            lambda: compute_astred_metrics(
                 predictions_df,
                 source_model_or_lang=astred_source_prediction_source_model_or_lang,
                 target_model_or_lang=target_model_or_lang,
@@ -470,28 +497,18 @@ def analyze_predictions(
                 source_column=astred_source_prediction_source_column,
                 target_column=astred_source_prediction_target_column,
                 alignment_column=astred_source_prediction_alignment_column,
-            )
+            ),
+        )
+        if result is not None:
             per_example = per_example.join(
-                _rename_astred_columns(
-                    source_prediction_result["per_example"],
-                    prefix="astred_source_prediction_",
-                )
+                _rename_astred_columns(result["per_example"], prefix="astred_source_prediction_")
             )
-            summary["astred_source_prediction"] = source_prediction_result["summary"]
-        except (ASTrEDAnalysisError, ValueError) as exc:
-            logger.warning("Skipping source-to-prediction ASTrED metrics: %s", exc)
+            summary["astred_source_prediction"] = result["summary"]
 
     if astred_source_reference:
-        target_model_or_lang = (
-            astred_source_prediction_target_model_or_lang or astred_model_or_lang
-        )
-        if not target_model_or_lang:
-            raise ValueError(
-                "Source-to-reference ASTrED requires "
-                "--astred-source-prediction-target-model-or-lang."
-            )
-        try:
-            source_reference_result = compute_astred_metrics(
+        result = _optional_metric(
+            "source-to-reference ASTrED metrics",
+            lambda: compute_astred_metrics(
                 predictions_df,
                 source_model_or_lang=astred_source_prediction_source_model_or_lang,
                 target_model_or_lang=target_model_or_lang,
@@ -499,19 +516,16 @@ def analyze_predictions(
                 source_column=astred_source_prediction_source_column,
                 target_column="reference",
                 alignment_column=None,
-            )
+            ),
+        )
+        if result is not None:
             per_example = per_example.join(
-                _rename_astred_columns(
-                    source_reference_result["per_example"],
-                    prefix="astred_source_reference_",
-                )
+                _rename_astred_columns(result["per_example"], prefix="astred_source_reference_")
             )
-            summary["astred_source_reference"] = source_reference_result["summary"]
-        except (ASTrEDAnalysisError, ValueError) as exc:
-            logger.warning("Skipping source-to-reference ASTrED metrics: %s", exc)
+            summary["astred_source_reference"] = result["summary"]
 
     summary["implemented_metrics_note"] = (
-        "Adequacy is reported separately (BLEU, TER, chrF++, optional COMET-family metrics, and MetricX-24). "
+        "Translation quality is reported separately (BLEU, TER, chrF++, optional COMET-family metrics, and MetricX-24). "
         "Target-side reference and prediction sections report corpus-level TTR, Yule's K/I, MTLD, "
         "fixed B1/B2/B3 lexical-frequency bands, lemma-to-wordform Shannon/Simpson morphology, "
         "and dictionary-grounded SFA when Stanza and an Apertium dictionary are available."
@@ -528,7 +542,7 @@ def persist_analysis_outputs(
     output_dir: str | Path,
     force: bool = False,
 ) -> dict[str, str]:
-    """Persist baseline analysis outputs next to the prediction run."""
+    """Write the summary and per-example metric files."""
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
 
@@ -693,7 +707,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
 
 
 def run_evaluation(args: argparse.Namespace | None = None) -> dict[str, Any]:
-    """Run the complete evaluation pipeline."""
+    """Evaluate one prediction file and write its metrics."""
     if args is None:
         args = build_arg_parser().parse_args()
     logging.basicConfig(
@@ -738,12 +752,8 @@ def run_evaluation(args: argparse.Namespace | None = None) -> dict[str, Any]:
         ),
         astred_source_prediction_source_column=args.astred_source_prediction_source_column,
         astred_source_prediction_target_column=args.astred_source_prediction_target_column,
-        astred_source_prediction_alignment_column=(
-            args.astred_source_prediction_alignment_column
-        ),
-        astred_source_reference=(
-            args.astred_source_reference or args.astred_source_prediction
-        ),
+        astred_source_prediction_alignment_column=(args.astred_source_prediction_alignment_column),
+        astred_source_reference=(args.astred_source_reference or args.astred_source_prediction),
     )
     finished_at_utc = _utc_now_iso()
     runtime_seconds = time.perf_counter() - start_time

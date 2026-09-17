@@ -1,9 +1,4 @@
-"""Build classifier datasets from deterministic P4 SFT hard negatives.
-
-This module extracts the portable data logic that was originally embedded in
-cluster job files. It never loads a model. Run ``prepare``, generate P4 outputs
-with :mod:`src.sft.evaluate`, and then run ``combine``.
-"""
+"""Build classifier data from P4 translations and human references."""
 
 from __future__ import annotations
 
@@ -13,22 +8,20 @@ from collections import Counter
 from pathlib import Path
 from typing import Any, Iterable
 
+from src.utils.errors import PipelineError
+
 DATASETS = ("en_eu", "en_ca")
 SPLITS = ("train", "dev", "test")
 DEFAULT_MODELS = ("latxa_8b_instruct", "salamandrata_7b_instruct")
 
 
-class HardNegativeDataError(RuntimeError):
-    """Raised when a hard-negative split is incomplete or inconsistent."""
-
-
 def _read_jsonl(path: Path) -> list[dict[str, Any]]:
     if not path.exists():
-        raise HardNegativeDataError(f"Missing JSONL file: {path}")
+        raise PipelineError(f"Missing JSONL file: {path}")
     with path.open(encoding="utf-8") as handle:
         rows = [json.loads(line) for line in handle if line.strip()]
     if not rows:
-        raise HardNegativeDataError(f"Empty JSONL file: {path}")
+        raise PipelineError(f"Empty JSONL file: {path}")
     return rows
 
 
@@ -48,21 +41,21 @@ def _write_json(value: dict[str, Any], path: Path) -> None:
 
 
 def _require_pair(row: dict[str, Any], *, split: str, index: int) -> None:
-    missing = [field for field in ("source_id", "source", "target") if not str(row.get(field, "")).strip()]
+    missing = [
+        field for field in ("source_id", "source", "target") if not str(row.get(field, "")).strip()
+    ]
     if missing:
-        raise HardNegativeDataError(
-            f"{split} row {index} is missing required values: {', '.join(missing)}"
-        )
+        raise PipelineError(f"{split} row {index} is missing required values: {', '.join(missing)}")
 
 
 def protocol_names(dataset: str, unit: str) -> tuple[str, str]:
     if dataset not in DATASETS:
-        raise HardNegativeDataError(f"Unsupported dataset: {dataset}")
+        raise PipelineError(f"Unsupported dataset: {dataset}")
     if unit == "chunk":
         return f"{dataset}_sft5", f"{dataset}_sft5_chunks"
     if unit == "sentence":
         return f"{dataset}_sft_hard_sentence_v3", f"{dataset}_sft_hard_sentence_v3"
-    raise HardNegativeDataError(f"Unsupported unit: {unit}")
+    raise PipelineError(f"Unsupported unit: {unit}")
 
 
 def prepare_inputs(
@@ -74,17 +67,24 @@ def prepare_inputs(
     models: tuple[str, ...] = DEFAULT_MODELS,
     chunk_size: int = 5,
 ) -> dict[str, Any]:
-    """Prepare deterministic model-assigned P4 inputs from held-out pairs."""
+    """Prepare P4 inference inputs from held-out pairs."""
     if not models:
-        raise HardNegativeDataError("At least one negative model is required.")
+        raise PipelineError("At least one negative model is required.")
     if chunk_size < 1:
-        raise HardNegativeDataError("chunk_size must be positive.")
+        raise PipelineError("chunk_size must be positive.")
     if unit == "chunk" and chunk_size != 5:
-        raise HardNegativeDataError("The thesis chunk protocol uses exactly five sentences.")
+        raise PipelineError("The thesis chunk protocol uses exactly five sentences.")
 
     id_prefix, output_dataset_key = protocol_names(dataset, unit)
     pairs_dir = Path(pairs_root) / dataset
-    root = Path(output_root or ("data/classifier_chunks/sft5" if unit == "chunk" else "data/classifier_sentence/sft_hard_v3"))
+    root = Path(
+        output_root
+        or (
+            "data/classifier_chunks/sft5"
+            if unit == "chunk"
+            else "data/classifier_sentence/sft_hard_v3"
+        )
+    )
     report: dict[str, Any] = {
         "dataset_key": dataset,
         "unit": "five_sentence_chunk" if unit == "chunk" else "sentence",
@@ -114,7 +114,10 @@ def prepare_inputs(
                         "source": "\n\n".join(str(row["source"]).strip() for row in group),
                         "target": "\n\n".join(str(row["target"]).strip() for row in group),
                         "source_ids": [str(row["source_id"]) for row in group],
-                        "original_indices": [int(row.get("original_index", start + offset)) for offset, row in enumerate(group)],
+                        "original_indices": [
+                            int(row.get("original_index", start + offset))
+                            for offset, row in enumerate(group)
+                        ],
                         "split": split,
                         "chunk_size_sentences": chunk_size,
                     }
@@ -138,9 +141,7 @@ def prepare_inputs(
         for index, record in enumerate(records):
             model = models[index % len(models)]
             record["negative_model_key"] = model
-            inputs_by_model[model].append(
-                {key: record[key] for key in ("id", "source", "target")}
-            )
+            inputs_by_model[model].append({key: record[key] for key in ("id", "source", "target")})
             assignments[model] += 1
         for model, model_rows in inputs_by_model.items():
             _write_jsonl(model_rows, root / "p4_inputs" / model / f"{split}.jsonl")
@@ -172,9 +173,16 @@ def combine_outputs(
     output_root: str | Path | None = None,
     models: tuple[str, ...] = DEFAULT_MODELS,
 ) -> dict[str, Any]:
-    """Combine P4 predictions with references into balanced target-only data."""
+    """Combine P4 translations and references into balanced HT/MT splits."""
     id_prefix, output_dataset_key = protocol_names(dataset, unit)
-    root = Path(output_root or ("data/classifier_chunks/sft5" if unit == "chunk" else "data/classifier_sentence/sft_hard_v3"))
+    root = Path(
+        output_root
+        or (
+            "data/classifier_chunks/sft5"
+            if unit == "chunk"
+            else "data/classifier_sentence/sft_hard_v3"
+        )
+    )
     target_language = dataset.rsplit("_", 1)[1]
     report: dict[str, Any] = {
         "dataset_key": dataset,
@@ -191,18 +199,22 @@ def combine_outputs(
         predictions: dict[str, str] = {}
         prediction_models: dict[str, str] = {}
         for model in models:
-            path = root / "p4_predictions" / output_dataset_key / model / split / "predictions.jsonl"
+            path = (
+                root / "p4_predictions" / output_dataset_key / model / split / "predictions.jsonl"
+            )
             for row in _read_jsonl(path):
                 record_id = str(row.get("id") or row.get("sentence_id") or "")
                 if not record_id or record_id in predictions:
-                    raise HardNegativeDataError(f"Missing or duplicate prediction ID in {path}: {record_id!r}")
+                    raise PipelineError(
+                        f"Missing or duplicate prediction ID in {path}: {record_id!r}"
+                    )
                 predictions[record_id] = str(row.get("prediction", "")).strip()
                 prediction_models[record_id] = model
 
         if set(predictions) != set(expected):
             missing = sorted(set(expected) - set(predictions))[:5]
             unexpected = sorted(set(predictions) - set(expected))[:5]
-            raise HardNegativeDataError(
+            raise PipelineError(
                 f"Prediction IDs do not match {split}: missing={missing}, unexpected={unexpected}"
             )
 
@@ -212,7 +224,7 @@ def combine_outputs(
             prediction = predictions[record_id]
             lowered = prediction.lower()
             if not prediction or "<translation>" in lowered or "</translation>" in lowered:
-                raise HardNegativeDataError(f"Invalid P4 negative for {record_id}.")
+                raise PipelineError(f"Invalid P4 negative for {record_id}.")
             model = prediction_models[record_id]
             provenance: dict[str, Any] = {
                 "split": split,

@@ -1,9 +1,8 @@
-"""P5 GRPO training from a P4 SFT LoRA adapter."""
+"""Train P5 GRPO adapters from P4 checkpoints."""
 
 from __future__ import annotations
 
 import argparse
-import copy
 import json
 import logging
 import math
@@ -29,42 +28,24 @@ from src.sft.train import (
     prepare_model_for_distributed_qlora_training,
     resolve_sft_settings,
 )
-from src.utils.config import get_model_entry, load_grpo_config, load_sft_config
+from src.utils.config import (
+    get_model_entry,
+    load_grpo_config,
+    load_sft_config,
+    merge_model_overrides,
+)
+from src.utils.errors import PipelineError
 from src.utils.io import save_json
 
 logger = logging.getLogger(__name__)
 
 
-class GRPOTrainingError(RuntimeError):
-    """Raised when P5 GRPO cannot be configured or launched safely."""
-
-
-def _merge_mapping(base: Mapping[str, Any], override: Mapping[str, Any]) -> dict[str, Any]:
-    merged = copy.deepcopy(dict(base))
-    for key, value in override.items():
-        if isinstance(value, Mapping) and isinstance(merged.get(key), Mapping):
-            merged[key] = _merge_mapping(merged[key], value)
-        else:
-            merged[key] = copy.deepcopy(value)
-    return merged
-
-
 def resolve_grpo_settings(config: Mapping[str, Any], model_key: str) -> dict[str, Any]:
-    overrides = config.get("model_overrides", {})
-    override = overrides.get(model_key, {})
-    if not isinstance(override, Mapping):
-        raise GRPOTrainingError(f"grpo.model_overrides.{model_key} must be a mapping")
-    return _merge_mapping(config, override)
+    return merge_model_overrides(config, "grpo", model_key)
 
 
 def _prepare_trl_vllm_import() -> None:
-    """Bridge an import-only vLLM API rename while P5 uses Transformers generation.
-
-    TRL 0.19 imports the removed GuidedDecodingParams symbol whenever vLLM is
-    installed, even with use_vllm=False. The placeholder is never instantiated
-    by this protocol; it gives a clear error if a future configuration enables
-    the incompatible guided-decoding integration.
-    """
+    """Provide TRL's removed guided-decoding symbol when it is imported but unused."""
     try:  # pragma: no cover - depends on optional vLLM installation
         import vllm.sampling_params as sampling_params
     except ImportError:
@@ -74,7 +55,7 @@ def _prepare_trl_vllm_import() -> None:
 
     class _UnsupportedGuidedDecodingParams:
         def __init__(self, *_: Any, **__: Any) -> None:
-            raise GRPOTrainingError(
+            raise PipelineError(
                 "P5 disables vLLM generation. Guided decoding is incompatible with the installed "
                 "vLLM API; keep training.use_vllm=false."
             )
@@ -105,14 +86,13 @@ def _load_trl(
 ) -> tuple[Any, Any]:
     import trl.import_utils as trl_import_utils
 
-    # Import GRPOTrainer without eagerly importing vLLM. The real vLLM module
-    # is loaded only after Trainer has FSDP-sharded the 70B policy.
+    # Delay the vLLM import until Trainer has sharded the 70B policy.
     original_vllm_available = trl_import_utils._vllm_available
     trl_import_utils._vllm_available = False
     try:
         from trl import GRPOConfig, GRPOTrainer
     except (ImportError, RuntimeError) as exc:  # pragma: no cover - optional runtime
-        raise GRPOTrainingError(
+        raise PipelineError(
             "P5 GRPO requires a compatible TRL installation. Install the project GRPO extra."
         ) from exc
     finally:
@@ -132,12 +112,12 @@ def _load_trl(
 
             guided_decoding = kwargs.pop("guided_decoding", None)
             if guided_decoding is not None:
-                raise GRPOTrainingError("Guided decoding is not supported by the installed vLLM API.")
+                raise PipelineError("Guided decoding is not supported by the installed vLLM API.")
             return SamplingParams(*args, **kwargs)
 
     class UnsupportedGuidedDecodingParams:
         def __init__(self, *_: Any, **__: Any) -> None:
-            raise GRPOTrainingError("Guided decoding is not supported by the installed vLLM API.")
+            raise PipelineError("Guided decoding is not supported by the installed vLLM API.")
 
     grpo_trainer_module.is_vllm_available = lambda: True
     grpo_trainer_module.LLM = LazyLLM
@@ -209,7 +189,7 @@ def _normalise_peft_lora_key(name: str) -> str:
 
 
 def _save_fsdp_lora_adapter(model: Any, adapter_dir: Path, source_adapter: Path) -> None:
-    """Gather only LoRA tensors and write a vLLM-compatible PEFT adapter."""
+    """Save only LoRA tensors in a vLLM-compatible PEFT directory."""
     from safetensors.torch import save_file
     from torch.distributed.fsdp import FullyShardedDataParallel as FSDP
 
@@ -237,16 +217,14 @@ def _save_fsdp_lora_adapter(model: Any, adapter_dir: Path, source_adapter: Path)
     visit(model)
     if distributed_rank() == 0:
         if not tensors:
-            raise GRPOTrainingError("FSDP adapter synchronization found no LoRA tensors.")
+            raise PipelineError("FSDP adapter synchronization found no LoRA tensors.")
         adapter_dir.mkdir(parents=True, exist_ok=True)
         shutil.copy2(source_adapter / "adapter_config.json", adapter_dir / "adapter_config.json")
         save_file(tensors, adapter_dir / "adapter_model.safetensors")
     torch.distributed.barrier()
 
 
-def _sync_lora_adapter_to_vllm(
-    trainer: Any, initial_adapter: Path, sync_root: Path | None
-) -> None:
+def _sync_lora_adapter_to_vllm(trainer: Any, initial_adapter: Path, sync_root: Path | None) -> None:
     """Generate with the active LoRA and refresh it after each policy update."""
     from vllm.lora.request import LoRARequest
 
@@ -255,7 +233,7 @@ def _sync_lora_adapter_to_vllm(
         adapter_path = initial_adapter
     else:
         if sync_root is None:
-            raise GRPOTrainingError("A vLLM LoRA synchronization directory is required.")
+            raise PipelineError("A vLLM LoRA synchronization directory is required.")
         adapter_path = sync_root / f"step_{step:06d}"
         _save_fsdp_lora_adapter(trainer.model, adapter_path, initial_adapter)
 
@@ -286,14 +264,14 @@ def _sync_lora_adapter_to_vllm(
 
 @contextmanager
 def _peft_adapter_loading_compatibility(model: Any):
-    """Skip PEFT's unavailable TP hook only for a non-TP FSDP model."""
+    """Skip PEFT's tensor-parallel hook for a non-TP FSDP model."""
     from transformers.integrations import tensor_parallel
 
     if hasattr(tensor_parallel, "EmbeddingParallel"):
         yield
         return
     if any(getattr(module, "_hf_device_mesh", None) is not None for module in model.modules()):
-        raise GRPOTrainingError(
+        raise PipelineError(
             "PEFT requires Transformers to provide EmbeddingParallel for an active "
             "tensor-parallel model. Use compatible PEFT/Transformers versions."
         )
@@ -313,22 +291,20 @@ def _peft_adapter_loading_compatibility(model: Any):
 
 
 def _validate_parent_adapter_lora(sft_adapter_dir: Path, lora: dict[str, Any]) -> None:
-    """Refuse to continue a P4 adapter with a LoRA rank/alpha outside the P5 protocol."""
+    """Check that P4 and P5 use the same LoRA rank and alpha."""
     config_path = sft_adapter_dir / "adapter_config.json"
     if not config_path.exists():
-        raise GRPOTrainingError(f"P4 adapter configuration not found: {config_path}")
+        raise PipelineError(f"P4 adapter configuration not found: {config_path}")
     try:
         adapter_config = json.loads(config_path.read_text(encoding="utf-8"))
     except json.JSONDecodeError as exc:
-        raise GRPOTrainingError(
-            f"P4 adapter configuration is not valid JSON: {config_path}"
-        ) from exc
+        raise PipelineError(f"P4 adapter configuration is not valid JSON: {config_path}") from exc
     expected_r = int(lora["r"])
     expected_alpha = int(lora["lora_alpha"])
     actual_r = adapter_config.get("r")
     actual_alpha = adapter_config.get("lora_alpha")
     if actual_r != expected_r or actual_alpha != expected_alpha:
-        raise GRPOTrainingError(
+        raise PipelineError(
             "P5 requires its P4 parent adapter to use LoRA r={} and alpha={}; found r={} and alpha={} "
             "in {}. Retrain P4 with configs/sft.yaml before launching P5.".format(
                 expected_r, expected_alpha, actual_r, actual_alpha, config_path
@@ -337,7 +313,7 @@ def _validate_parent_adapter_lora(sft_adapter_dir: Path, lora: dict[str, Any]) -
 
 
 def _validate_trainable_lora_parameters(model: Any) -> int:
-    """Prove that the loaded P4 adapter exposes trainable LoRA weights."""
+    """Check that the loaded P4 adapter has trainable LoRA weights."""
     trainable = [
         (name, parameter)
         for name, parameter in model.named_parameters()
@@ -347,12 +323,12 @@ def _validate_trainable_lora_parameters(model: Any) -> int:
         (name, parameter) for name, parameter in trainable if "lora_" in name.lower()
     ]
     if not lora_parameters:
-        raise GRPOTrainingError(
+        raise PipelineError(
             "P5 loaded no trainable LoRA parameters. Refusing to run GRPO without an adapter."
         )
     parameter_count = sum(int(parameter.numel()) for _, parameter in lora_parameters)
     if parameter_count <= 0:  # pragma: no cover - a tensor cannot have negative size
-        raise GRPOTrainingError("P5 LoRA adapter has no trainable parameters.")
+        raise PipelineError("P5 LoRA adapter has no trainable parameters.")
     logger.info(
         "P5 LoRA trainable parameters: %d tensors, %d parameters",
         len(lora_parameters),
@@ -362,12 +338,7 @@ def _validate_trainable_lora_parameters(model: Any) -> int:
 
 
 def _validate_fsdp_rollout_wrapping(trainer: Any) -> int:
-    """Require nested FSDP units before Transformers-based GRPO rollouts.
-
-    TRL temporarily materialises only the outer FSDP unit during generation.
-    That is memory-safe for a 70B model only when decoder layers are separate
-    child FSDP units and gather their parameters one layer at a time.
-    """
+    """Check that FSDP wraps decoder layers separately before 70B rollouts."""
     if not bool(trainer.is_fsdp_enabled):
         return 0
 
@@ -375,7 +346,7 @@ def _validate_fsdp_rollout_wrapping(trainer: Any) -> int:
 
     units = [module for module in trainer.model_wrapped.modules() if isinstance(module, FSDP)]
     if len(units) < 2:
-        raise GRPOTrainingError(
+        raise PipelineError(
             "FSDP created only one root unit. GRPO rollout generation would gather "
             "the complete model on every GPU. Configure "
             "fsdp_transformer_layer_cls_to_wrap for the model's decoder layer."
@@ -390,7 +361,7 @@ def _validate_fsdp_rollout_wrapping(trainer: Any) -> int:
 
 @dataclass(frozen=True)
 class GRPOBatchPlan:
-    """TRL batch sizes expressed in completions and distinct source prompts."""
+    """Batch sizes in completions and distinct source prompts."""
 
     world_size: int
     per_device_batch_size: int
@@ -405,7 +376,7 @@ class GRPOBatchPlan:
 def resolve_grpo_batch_plan(training: dict[str, Any], world_size: int = 1) -> GRPOBatchPlan:
     """Resolve TRL's distributed completion batches into source-prompt batches."""
     if world_size <= 0:
-        raise GRPOTrainingError("world_size must be positive.")
+        raise PipelineError("world_size must be positive.")
     per_device = int(training["per_device_train_batch_size"])
     accumulation = int(training["gradient_accumulation_steps"])
     generations = int(training["num_generations"])
@@ -413,22 +384,22 @@ def resolve_grpo_batch_plan(training: dict[str, Any], world_size: int = 1) -> GR
     global_micro_batch = per_device * world_size
     effective_completions = global_micro_batch * accumulation
     if effective_completions % generations:
-        raise GRPOTrainingError(
+        raise PipelineError(
             f"Effective completion batch {effective_completions} is not divisible by G={generations}."
         )
     if generation_batch % generations:
-        raise GRPOTrainingError(
+        raise PipelineError(
             f"Generation batch {generation_batch} is not divisible by G={generations}."
         )
     if generation_batch % global_micro_batch:
-        raise GRPOTrainingError(
+        raise PipelineError(
             f"Generation batch {generation_batch} is not divisible by distributed "
             f"micro-batch {global_micro_batch}."
         )
     effective_prompts = effective_completions // generations
     configured_prompts = int(training["effective_prompt_batch_size"])
     if effective_prompts != configured_prompts:
-        raise GRPOTrainingError(
+        raise PipelineError(
             f"Effective prompt batch is {effective_prompts}, not configured {configured_prompts}."
         )
     return GRPOBatchPlan(
@@ -441,7 +412,6 @@ def resolve_grpo_batch_plan(training: dict[str, Any], world_size: int = 1) -> GR
         effective_prompt_batch_size=effective_prompts,
         prompts_per_generation_batch=generation_batch // generations,
     )
-
 
 
 def train_grpo(
@@ -457,14 +427,14 @@ def train_grpo(
     results_root: str | Path | None = None,
     sft_adapter_root: str | Path | None = None,
 ) -> dict[str, str]:
-    """Run P5 from the configured P4 adapter using a selected GRPO ablation."""
+    """Train one P5 ablation from its P4 adapter."""
     grpo_config = load_grpo_config(config_path)["grpo"]
     grpo_root = resolve_grpo_settings(grpo_config, model_key)
     if dataset_key not in grpo_root["target_languages"]:
-        raise GRPOTrainingError(f"Unsupported P5 dataset: {dataset_key}")
+        raise PipelineError(f"Unsupported P5 dataset: {dataset_key}")
     selected_ablation = str(ablation or grpo_root["reward"]["active_ablation"])
     if selected_ablation not in grpo_root["reward"]["ablations"]:
-        raise GRPOTrainingError(f"Unknown P5 ablation: {selected_ablation}")
+        raise PipelineError(f"Unknown P5 ablation: {selected_ablation}")
 
     model_entry = get_model_entry(model_key, models_config_path)
     sft_root = load_sft_config(sft_config_path)["sft"]
@@ -473,7 +443,7 @@ def train_grpo(
     training = grpo_root["training"]
     blocked_reason = training.get("blocked_reason")
     if blocked_reason:
-        raise GRPOTrainingError(str(blocked_reason))
+        raise PipelineError(str(blocked_reason))
     world_size = distributed_world_size()
     if torch.cuda.is_available():
         local_rank = int(os.environ.get("LOCAL_RANK", "0"))
@@ -481,23 +451,23 @@ def train_grpo(
         logger.info("Bound distributed rank %d to CUDA device %d", distributed_rank(), local_rank)
     required_world_size = int(training.get("required_world_size", world_size))
     if world_size != required_world_size:
-        raise GRPOTrainingError(
+        raise PipelineError(
             f"{model_key} GRPO requires {required_world_size} distributed processes; "
             f"found {world_size}."
         )
     required_cuda_devices = int(training.get("required_cuda_devices", 0))
     if torch.cuda.device_count() < required_cuda_devices:
-        raise GRPOTrainingError(
+        raise PipelineError(
             f"{model_key} GRPO requires {required_cuda_devices} visible CUDA devices; "
             f"found {torch.cuda.device_count()}."
         )
     reward = build_translation_grpo_reward(grpo_root, dataset_key, ablation=selected_ablation)
     batch_plan = resolve_grpo_batch_plan(training, world_size=world_size)
     if batch_plan.num_generations != reward.group_size:
-        raise GRPOTrainingError("training.num_generations must equal reward.group_size.")
+        raise PipelineError("training.num_generations must equal reward.group_size.")
     global_eval_batch = int(training["per_device_eval_batch_size"]) * batch_plan.world_size
     if global_eval_batch % batch_plan.num_generations != 0:
-        raise GRPOTrainingError(
+        raise PipelineError(
             "The global evaluation batch must be divisible by training.num_generations."
         )
 
@@ -507,7 +477,7 @@ def train_grpo(
     try:
         from peft import PeftModel, prepare_model_for_kbit_training
     except ImportError as exc:  # pragma: no cover - project dependency
-        raise GRPOTrainingError("P5 GRPO requires peft.") from exc
+        raise PipelineError("P5 GRPO requires peft.") from exc
     if bool(sft_settings["quantization"].get("load_in_4bit", False)):
         gradient_checkpointing = bool(training["gradient_checkpointing"])
         gradient_checkpointing_kwargs = dict(training.get("gradient_checkpointing_kwargs", {}))
@@ -529,11 +499,9 @@ def train_grpo(
         / model_key
     )
     if not sft_adapter_dir.exists():
-        raise GRPOTrainingError(f"P4 SFT adapter not found: {sft_adapter_dir}")
+        raise PipelineError(f"P4 SFT adapter not found: {sft_adapter_dir}")
     _validate_parent_adapter_lora(sft_adapter_dir, dict(grpo_root["lora"]))
-    native_vllm_lora = (
-        sft_adapter_dir if bool(training.get("vllm_native_lora", False)) else None
-    )
+    native_vllm_lora = sft_adapter_dir if bool(training.get("vllm_native_lora", False)) else None
     vllm_sync_dir = (
         Path(results_root or grpo_root["results_root"])
         / selected_ablation
@@ -566,7 +534,7 @@ def train_grpo(
     }
     required_model_devices = int(training.get("required_model_devices", 0))
     if len(model_devices) < required_model_devices:
-        raise GRPOTrainingError(
+        raise PipelineError(
             f"{model_key} must be sharded across {required_model_devices} CUDA devices; "
             f"the resolved device map uses {sorted(model_devices)}."
         )
@@ -585,7 +553,7 @@ def train_grpo(
     )
     if max_train_examples is not None:
         if max_train_examples <= 0:
-            raise GRPOTrainingError("max_train_examples must be positive when provided.")
+            raise PipelineError("max_train_examples must be positive when provided.")
         train_records = train_records[:max_train_examples]
     evaluation_enabled = str(training["eval_strategy"]).lower() != "no"
     dev_records = []
@@ -664,7 +632,7 @@ def train_grpo(
         remove_unused_columns=False,
         seed=int(training["seed"]),
     )
-    # Prevent faster ranks from reserving colocated vLLM memory while another rank is still loading.
+    # Wait for every rank before colocated vLLM reserves GPU memory.
     if world_size > 1:
         torch.distributed.barrier()
 
@@ -680,7 +648,7 @@ def train_grpo(
         batch_plan.per_device_batch_size * batch_plan.world_size
     )
     if int(trainer.args.steps_per_generation) != expected_steps_per_generation:
-        raise GRPOTrainingError(
+        raise PipelineError(
             "TRL resolved an unexpected steps_per_generation: "
             f"{trainer.args.steps_per_generation} != {expected_steps_per_generation}."
         )

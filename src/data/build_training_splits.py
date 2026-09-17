@@ -11,14 +11,11 @@ from typing import Any
 
 import pandas as pd
 
-from src.prompting._shared import load_processed_split
+from src.data.loaders import load_processed_split
+from src.utils.errors import PipelineError
 from src.utils.io import save_dataframe_jsonl, save_json
 
 logger = logging.getLogger(__name__)
-
-
-class TrainingSplitError(RuntimeError):
-    """Raised when SFT/GRPO split construction is unsafe or inconsistent."""
 
 
 @dataclass(frozen=True)
@@ -50,12 +47,10 @@ def _validate_columns(frame: pd.DataFrame, label: str) -> pd.DataFrame:
     required = {"id", "source", "target"}
     missing = required - set(result.columns)
     if missing:
-        raise TrainingSplitError(f"{label} is missing required columns: {sorted(missing)}")
+        raise PipelineError(f"{label} is missing required columns: {sorted(missing)}")
     core_columns = ["id", "source", "target"]
     metadata_columns = [
-        column
-        for column in result.columns
-        if column not in {*core_columns, "sentence_id"}
+        column for column in result.columns if column not in {*core_columns, "sentence_id"}
     ]
     return result[core_columns + metadata_columns].copy()
 
@@ -69,7 +64,7 @@ def build_ordered_training_splits(
     train = _validate_columns(train_frame, "train")
     test = _validate_columns(test_frame, "test")
     if len(train) < sizes.required_train_rows:
-        raise TrainingSplitError(
+        raise PipelineError(
             f"Expected at least {sizes.required_train_rows} processed train rows, found {len(train)}."
         )
 
@@ -91,7 +86,7 @@ def build_ordered_training_splits(
     }
     for name, count in expected.items():
         if len(splits[name]) != count:
-            raise TrainingSplitError(f"{name} contains {len(splits[name])} rows, expected {count}.")
+            raise PipelineError(f"{name} contains {len(splits[name])} rows, expected {count}.")
     return splits
 
 
@@ -112,7 +107,7 @@ def deduplicate_training_splits(
         "grpo_dev",
     )
     if set(priority) != set(splits):
-        raise TrainingSplitError("Deduplication received an unexpected split set.")
+        raise PipelineError("Deduplication received an unexpected split set.")
     seen = {"id": set(), "source": set(), "target": set(), "source_target_pair": set()}
     retained: dict[str, pd.DataFrame] = {}
     report: dict[str, Any] = {"priority": list(priority), "splits": {}}
@@ -163,7 +158,7 @@ def refill_deduplicated_splits(
         "grpo_dev",
     )
     if set(priority) != set(splits) or set(priority) != set(expected_sizes):
-        raise TrainingSplitError("Reserve refill received unexpected split names.")
+        raise PipelineError("Reserve refill received unexpected split names.")
 
     seen = {"id": set(), "source": set(), "target": set(), "source_target_pair": set()}
     refilled: dict[str, pd.DataFrame] = {}
@@ -173,7 +168,7 @@ def refill_deduplicated_splits(
         frame = splits[name].copy()
         target_size = expected_sizes[name]
         if len(frame) > target_size:
-            raise TrainingSplitError(f"{name} has {len(frame)} rows, expected at most {target_size}.")
+            raise PipelineError(f"{name} has {len(frame)} rows, expected at most {target_size}.")
         while len(frame) < target_size:
             replacement = None
             while cursor < len(reserve):
@@ -190,7 +185,7 @@ def refill_deduplicated_splits(
                     used_reserve_ids.append(str(candidate["id"]))
                     break
             if replacement is None:
-                raise TrainingSplitError(
+                raise PipelineError(
                     f"Evaluation reserve exhausted while restoring {name} to {target_size} rows."
                 )
             frame = pd.concat([frame, replacement], ignore_index=True)
@@ -223,7 +218,7 @@ def validate_training_splits(splits: dict[str, pd.DataFrame]) -> dict[str, Any]:
         overlap = {field: len(keys[left][field] & keys[right][field]) for field in keys[left]}
         pairwise[f"{left}__{right}"] = overlap
         if any(overlap.values()):
-            raise TrainingSplitError(f"Overlap between {left} and {right}: {overlap}")
+            raise PipelineError(f"Overlap between {left} and {right}: {overlap}")
     return {"passed": True, "pairwise_overlap": pairwise}
 
 
@@ -241,7 +236,7 @@ def _length_summary(values: pd.Series) -> dict[str, float | int]:
 
 
 def split_length_statistics(frame: pd.DataFrame) -> dict[str, Any]:
-    """Return transparent source/target character and whitespace-token statistics."""
+    """Summarize source and target lengths."""
     source = frame["source"].astype(str)
     target = frame["target"].astype(str)
     return {
@@ -259,7 +254,7 @@ def persist_training_splits(
     output_dir: str | Path = "data/training",
     force: bool = False,
 ) -> dict[str, str]:
-    """Persist the train/development splits and the in-domain test split."""
+    """Write the training, development, and in-domain test splits."""
     root = Path(output_dir) / dataset_key
     paths = {
         "sft_train": root / "sft" / "train.jsonl",
@@ -271,7 +266,9 @@ def persist_training_splits(
     if not force:
         existing = [path for path in paths.values() if path.exists()]
         if existing:
-            raise FileExistsError("Training split output already exists: " + ", ".join(map(str, existing)))
+            raise FileExistsError(
+                "Training split output already exists: " + ", ".join(map(str, existing))
+            )
     for name, path in paths.items():
         save_dataframe_jsonl(splits[name], path)
     return {name: str(path) for name, path in paths.items()}
@@ -285,7 +282,7 @@ def prepare_training_splits(
 ) -> dict[str, str]:
     """Construct SFT/GRPO train-dev splits and one held-out in-domain test set."""
     if dataset_key not in {"en_eu", "en_ca"}:
-        raise TrainingSplitError(f"Unsupported dataset for training split preparation: {dataset_key}")
+        raise PipelineError(f"Unsupported dataset for training split preparation: {dataset_key}")
     train = load_processed_split(dataset_key, "train", processed_dir)
     test = load_processed_split(dataset_key, "test", processed_dir)
     reserve = load_processed_split(dataset_key, "evaluation_reserve", processed_dir)
@@ -302,7 +299,9 @@ def prepare_training_splits(
             "source_files": {
                 "train": str(Path(processed_dir) / dataset_key / "train.jsonl"),
                 "test": str(Path(processed_dir) / dataset_key / "test.jsonl"),
-                "evaluation_reserve": str(Path(processed_dir) / dataset_key / "evaluation_reserve.jsonl"),
+                "evaluation_reserve": str(
+                    Path(processed_dir) / dataset_key / "evaluation_reserve.jsonl"
+                ),
             },
             "source_files_untouched": True,
             "selection_order": "processed train.jsonl original order; no shuffle before splitting",
@@ -319,7 +318,9 @@ def prepare_training_splits(
             "counts": {name: int(len(frame)) for name, frame in splits.items()},
             "deduplication": deduplication,
             "reserve_refill": reserve_refill,
-            "length_statistics": {name: split_length_statistics(frame) for name, frame in splits.items()},
+            "length_statistics": {
+                name: split_length_statistics(frame) for name, frame in splits.items()
+            },
             "overlap_validation": validation,
             "outputs": paths,
         },
@@ -330,7 +331,9 @@ def prepare_training_splits(
 
 
 def build_arg_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="Build ordered SFT, GRPO, and in-domain test splits.")
+    parser = argparse.ArgumentParser(
+        description="Build ordered SFT, GRPO, and in-domain test splits."
+    )
     parser.add_argument("--dataset", required=True, choices=("en_eu", "en_ca", "all"))
     parser.add_argument("--processed-dir", default="data/processed")
     parser.add_argument("--output-dir", default="data/training")
@@ -340,7 +343,9 @@ def build_arg_parser() -> argparse.ArgumentParser:
 
 def main() -> None:
     args = build_arg_parser().parse_args()
-    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
+    logging.basicConfig(
+        level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s"
+    )
     datasets = ("en_eu", "en_ca") if args.dataset == "all" else (args.dataset,)
     for dataset_key in datasets:
         paths = prepare_training_splits(

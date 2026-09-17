@@ -1,4 +1,4 @@
-"""Evaluate a contrastive HT-versus-MT LM on development and held-out chunks."""
+"""Evaluate the contrastive HT/MT scorer on development and test chunks."""
 
 from __future__ import annotations
 
@@ -12,26 +12,19 @@ from sklearn.metrics import accuracy_score, f1_score, precision_score, recall_sc
 from src.contrastive_lm.data import read_jsonl, split_path
 from src.contrastive_lm.reward import ContrastiveHTMTNaturalnessScorer
 from src.utils.config import load_contrastive_lm_config
+from src.utils.errors import PipelineError
 from src.utils.io import save_json
-
-
-class ContrastiveLMEvaluationError(RuntimeError):
-    """Raised when a contrastive-LM held-out evaluation is invalid."""
 
 
 def _split_records(data_root: str | Path, dataset_key: str, split: str) -> list[dict[str, Any]]:
     records = read_jsonl(split_path(data_root, dataset_key, split))
     if any("text" not in record or "label" not in record for record in records):
-        raise ContrastiveLMEvaluationError(
-            f"{dataset_key}/{split} must contain non-empty text and binary labels."
-        )
+        raise PipelineError(f"{dataset_key}/{split} must contain non-empty text and binary labels.")
     labels = [int(record["label"]) for record in records]
     if set(labels) != {0, 1}:
-        raise ContrastiveLMEvaluationError(
-            f"{dataset_key}/{split} must contain both HT=1 and MT=0 labels."
-        )
+        raise PipelineError(f"{dataset_key}/{split} must contain both HT=1 and MT=0 labels.")
     if any(not str(record["text"]).strip() for record in records):
-        raise ContrastiveLMEvaluationError(f"{dataset_key}/{split} contains empty target text.")
+        raise PipelineError(f"{dataset_key}/{split} contains empty target text.")
     return records
 
 
@@ -52,11 +45,11 @@ def evaluate_contrastive_lm(
     config_path: str | Path = "configs/contrastive_lm_qwen.yaml",
     output_path: str | Path | None = None,
 ) -> Path:
-    """Score development and test chunks using a development-calibrated HT/MT LM."""
+    """Calibrate on development data, then score the development and test splits."""
     config_path = Path(config_path)
     config = load_contrastive_lm_config(config_path)["contrastive_lm"]
     if dataset_key not in config["languages"]:
-        raise ContrastiveLMEvaluationError(f"No configuration for {dataset_key}.")
+        raise PipelineError(f"No configuration for {dataset_key}.")
     scorer = ContrastiveHTMTNaturalnessScorer(dataset_key, config_path)
     split_results: dict[str, dict[str, float | int]] = {}
     for split in ("dev", "test"):

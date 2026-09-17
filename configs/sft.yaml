@@ -5,6 +5,10 @@ sft:
   target_languages:
     en_eu: eu
     en_ca: ca
+  supported_models:
+    - latxa_8b_instruct
+    - salamandrata_7b_instruct
+
 
   chat_format:
     directory: chat
@@ -37,22 +41,6 @@ sft:
       - gate_proj
       - up_proj
       - down_proj
-
-  model_overrides:
-    latxa_70b_instruct:
-      quantization:
-        # FSDP can shard 4-bit weights when their storage dtype is floating point.
-        bnb_4bit_quant_storage: bfloat16
-      lora:
-        # Keep the 828M adapter parameters in the QLoRA compute dtype before sharding.
-        autocast_adapter_dtype: false
-      training:
-        required_world_size: 4
-        distributed_timeout_minutes: 30
-        gradient_accumulation_steps: 4
-        # bitsandbytes optimizer state cannot be gathered reliably by FSDP1.
-        save_only_model: true
-        load_best_model_at_end: false
 
   training:
     seed: 42

@@ -14,14 +14,11 @@ from transformers import AutoTokenizer
 
 from src.contrastive_lm.train import load_base_model
 from src.utils.config import load_contrastive_lm_config
+from src.utils.errors import PipelineError
 from src.utils.hf_auth import get_hf_token
 from src.utils.io import save_json, save_jsonl
 
 logger = logging.getLogger(__name__)
-
-
-class ContrastiveLMScoringError(RuntimeError):
-    """Raised when target-side HT/MT scoring cannot be completed safely."""
 
 
 def _input_device(model: Any) -> torch.device:
@@ -30,16 +27,16 @@ def _input_device(model: Any) -> torch.device:
 
 def load_adapter_lm(base_model: str, adapter_dir: Path, load_in_4bit: bool) -> tuple[Any, Any]:
     if not adapter_dir.exists():
-        raise ContrastiveLMScoringError(f"Contrastive-LM adapter not found: {adapter_dir}")
+        raise PipelineError(f"Contrastive-LM adapter not found: {adapter_dir}")
     try:
         from peft import PeftModel
     except ImportError as exc:  # pragma: no cover - project dependency
-        raise ContrastiveLMScoringError("peft is required for contrastive-LM scoring.") from exc
+        raise PipelineError("peft is required for contrastive-LM scoring.") from exc
     tokenizer = AutoTokenizer.from_pretrained(adapter_dir, token=get_hf_token(), use_fast=True)
     if tokenizer.pad_token_id is None:
         tokenizer.pad_token = tokenizer.eos_token
     if tokenizer.pad_token_id is None:
-        raise ContrastiveLMScoringError("Tokenizer must provide an EOS or PAD token.")
+        raise PipelineError("Tokenizer must provide an EOS or PAD token.")
     tokenizer.padding_side = "right"
     model = PeftModel.from_pretrained(
         load_base_model(base_model, load_in_4bit=load_in_4bit, training=False), adapter_dir
@@ -59,7 +56,7 @@ def average_token_logprobs(
 ) -> list[float | None]:
     """Return mean next-token log probability per text, ignoring padding tokens."""
     if batch_size < 1 or max_length < 2:
-        raise ContrastiveLMScoringError("batch_size must be positive and max_length at least two.")
+        raise PipelineError("batch_size must be positive and max_length at least two.")
     scores: list[float | None] = []
     device = _input_device(model)
     for start in range(0, len(texts), batch_size):
@@ -76,9 +73,11 @@ def average_token_logprobs(
         logits = model(**encoded).logits[:, :-1, :]
         targets = encoded["input_ids"][:, 1:]
         valid = encoded["attention_mask"][:, 1:].bool()
-        token_logprobs = F.log_softmax(logits.float(), dim=-1).gather(
-            dim=-1, index=targets.unsqueeze(-1)
-        ).squeeze(-1)
+        token_logprobs = (
+            F.log_softmax(logits.float(), dim=-1)
+            .gather(dim=-1, index=targets.unsqueeze(-1))
+            .squeeze(-1)
+        )
         for values, mask in zip(token_logprobs, valid, strict=True):
             token_count = int(mask.sum().item())
             scores.append(float(values[mask].mean().item()) if token_count else None)
@@ -92,7 +91,7 @@ def annotate_records(
     *,
     threshold: float | None,
 ) -> list[dict[str, Any]]:
-    """Preserve each JSONL record while adding HT/MT contrastive scores."""
+    """Add contrastive scores to each input record."""
     annotated: list[dict[str, Any]] = []
     for record, ht_value, mt_value in zip(records, ht_logprobs, mt_logprobs, strict=True):
         result = dict(record)
@@ -101,18 +100,20 @@ def annotate_records(
         score = None if ht_value is None or mt_value is None else float(ht_value - mt_value)
         result["htmt_score"] = score
         if threshold is not None:
-            result["htmt_label"] = None if score is None else ("ht_like" if score >= threshold else "mt_like")
+            result["htmt_label"] = (
+                None if score is None else ("ht_like" if score >= threshold else "mt_like")
+            )
         annotated.append(result)
     return annotated
 
 
 def _read_jsonl(path: Path) -> list[dict[str, Any]]:
     if not path.exists():
-        raise ContrastiveLMScoringError(f"Input JSONL not found: {path}")
+        raise PipelineError(f"Input JSONL not found: {path}")
     with path.open(encoding="utf-8") as handle:
         records = [json.loads(line) for line in handle if line.strip()]
     if not records:
-        raise ContrastiveLMScoringError("Input JSONL is empty.")
+        raise PipelineError("Input JSONL is empty.")
     return records
 
 
@@ -125,13 +126,13 @@ def score_jsonl(
     threshold: float | None = None,
     config_path: str | Path = "configs/contrastive_lm.yaml",
 ) -> dict[str, str]:
-    """Score a JSONL file with the HT-versus-MT contrastive-LM difference."""
+    """Score a JSONL file with the HT-minus-MT log-probability difference."""
     config = load_contrastive_lm_config(config_path)["contrastive_lm"]
     if dataset_key not in config["languages"]:
-        raise ContrastiveLMScoringError(f"No contrastive-LM language config for {dataset_key}.")
+        raise PipelineError(f"No contrastive-LM language config for {dataset_key}.")
     records = _read_jsonl(Path(input_path))
     if any(text_field not in record for record in records):
-        raise ContrastiveLMScoringError(f"Every record must contain text field {text_field!r}.")
+        raise PipelineError(f"Every record must contain text field {text_field!r}.")
     texts = [str(record[text_field]) for record in records]
     language = config["languages"][dataset_key]
     adapter_root = Path(config["adapter_root"]) / dataset_key
@@ -141,8 +142,11 @@ def score_jsonl(
         str(language["base_model"]), adapter_root / "ht", bool(model_config["load_in_4bit"])
     )
     ht_scores = average_token_logprobs(
-        ht_model, ht_tokenizer, texts,
-        batch_size=int(scoring_config["batch_size"]), max_length=int(model_config["max_length"]),
+        ht_model,
+        ht_tokenizer,
+        texts,
+        batch_size=int(scoring_config["batch_size"]),
+        max_length=int(model_config["max_length"]),
     )
     del ht_model
     if torch.cuda.is_available():
@@ -151,8 +155,11 @@ def score_jsonl(
         str(language["base_model"]), adapter_root / "mt", bool(model_config["load_in_4bit"])
     )
     mt_scores = average_token_logprobs(
-        mt_model, mt_tokenizer, texts,
-        batch_size=int(scoring_config["batch_size"]), max_length=int(model_config["max_length"]),
+        mt_model,
+        mt_tokenizer,
+        texts,
+        batch_size=int(scoring_config["batch_size"]),
+        max_length=int(model_config["max_length"]),
     )
     del mt_model
     if torch.cuda.is_available():
@@ -194,12 +201,18 @@ def main() -> None:
     args = build_arg_parser().parse_args()
     config = load_contrastive_lm_config(args.config)["contrastive_lm"]
     text_field = args.text_field or str(config["scoring"]["text_field"])
-    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
+    logging.basicConfig(
+        level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s"
+    )
     logger.info(
         "Contrastive HT/MT scoring complete: %s",
         score_jsonl(
-            args.dataset, args.input_path, args.output_path,
-            text_field=text_field, threshold=args.threshold, config_path=args.config,
+            args.dataset,
+            args.input_path,
+            args.output_path,
+            text_field=text_field,
+            threshold=args.threshold,
+            config_path=args.config,
         ),
     )
 

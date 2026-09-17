@@ -1,4 +1,4 @@
-"""Lexical and morphology diversity helpers."""
+"""Compute lexical and morphological diversity."""
 
 from __future__ import annotations
 

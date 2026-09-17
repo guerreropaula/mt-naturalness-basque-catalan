@@ -1,12 +1,11 @@
-"""Registry-driven QLoRA/LoRA supervised fine-tuning for translation."""
+"""Train translation models with QLoRA adapters."""
 
 from __future__ import annotations
 
 import argparse
-import copy
 import logging
-from datetime import timedelta
 import os
+from datetime import timedelta
 from pathlib import Path
 from typing import Any, Mapping
 
@@ -15,8 +14,14 @@ import torch.nn.functional as F
 
 os.environ.pop("TRANSFORMERS_CACHE", None)
 
-from transformers import AutoModelForCausalLM, AutoTokenizer, BitsAndBytesConfig
-from transformers import Trainer, TrainingArguments, set_seed
+from transformers import (
+    AutoModelForCausalLM,
+    AutoTokenizer,
+    BitsAndBytesConfig,
+    Trainer,
+    TrainingArguments,
+    set_seed,
+)
 
 from src.sft.data import (
     CausalLMCollator,
@@ -24,15 +29,12 @@ from src.sft.data import (
     load_jsonl_records,
     pack_translation_dataset,
 )
-from src.utils.config import ModelEntry, get_model_entry, load_sft_config
+from src.utils.config import ModelEntry, get_model_entry, load_sft_config, merge_model_overrides
+from src.utils.errors import PipelineError
 from src.utils.hf_auth import get_hf_token
 from src.utils.io import save_json
 
 logger = logging.getLogger(__name__)
-
-
-class SFTTrainingError(RuntimeError):
-    """Raised when an SFT run cannot be configured safely."""
 
 
 class ModelParallelCausalLMTrainer(Trainer):
@@ -56,7 +58,7 @@ class ModelParallelCausalLMTrainer(Trainer):
         if supervised.numel() and (
             int(supervised.min()) < 0 or int(supervised.max()) >= vocab_size
         ):
-            raise SFTTrainingError(
+            raise PipelineError(
                 f"SFT label range [{int(supervised.min())}, {int(supervised.max())}] "
                 f"is outside model vocabulary [0, {vocab_size})."
             )
@@ -72,22 +74,8 @@ class ModelParallelCausalLMTrainer(Trainer):
         return (loss, outputs) if return_outputs else loss
 
 
-def _merge_mapping(base: Mapping[str, Any], override: Mapping[str, Any]) -> dict[str, Any]:
-    merged = copy.deepcopy(dict(base))
-    for key, value in override.items():
-        if isinstance(value, Mapping) and isinstance(merged.get(key), Mapping):
-            merged[key] = _merge_mapping(merged[key], value)
-        else:
-            merged[key] = copy.deepcopy(value)
-    return merged
-
-
 def resolve_sft_settings(config: Mapping[str, Any], model_key: str) -> dict[str, Any]:
-    overrides = config.get("model_overrides", {})
-    override = overrides.get(model_key, {})
-    if not isinstance(override, Mapping):
-        raise SFTTrainingError(f"sft.model_overrides.{model_key} must be a mapping")
-    return _merge_mapping(config, override)
+    return merge_model_overrides(config, "sft", model_key)
 
 
 def _torch_dtype(use_bf16: bool) -> torch.dtype:
@@ -112,7 +100,7 @@ def align_fsdp_qlora_parameter_dtypes(
     for name, parameter in model.named_parameters():
         if parameter.__class__.__name__ == "Params4bit":
             if parameter.dtype != target_dtype:
-                raise SFTTrainingError(
+                raise PipelineError(
                     f"FSDP QLoRA parameter {name} uses {parameter.dtype}, not "
                     f"configured storage dtype {target_dtype}."
                 )
@@ -125,7 +113,7 @@ def align_fsdp_qlora_parameter_dtypes(
         parameter.dtype for parameter in model.parameters() if parameter.is_floating_point()
     }
     if remaining_dtypes != {target_dtype}:
-        raise SFTTrainingError(
+        raise PipelineError(
             "FSDP QLoRA still has mixed floating parameter dtypes after alignment: "
             f"{sorted(map(str, remaining_dtypes))}."
         )
@@ -172,34 +160,31 @@ def prepare_model_for_distributed_qlora_training(
 
 
 def distributed_world_size() -> int:
-    """Return the process count set by torchrun or Accelerate."""
     return max(1, int(os.environ.get("WORLD_SIZE", "1")))
 
 
 def distributed_rank() -> int:
-    """Return the global process rank, defaulting to the only process."""
     return int(os.environ.get("RANK", "0"))
 
 
 def local_process_index() -> int:
-    """Return the CUDA index assigned to this process."""
     return int(os.environ.get("LOCAL_RANK", "0"))
 
 
 def _validate_trainable_lora_parameters(model: Any) -> int:
-    """Refuse an SFT run unless the newly attached LoRA adapter can learn."""
+    """Check that the new adapter has trainable LoRA weights."""
     lora_parameters = [
         (name, parameter)
         for name, parameter in model.named_parameters()
         if parameter.requires_grad and "lora_" in name.lower()
     ]
     if not lora_parameters:
-        raise SFTTrainingError(
+        raise PipelineError(
             "P4 attached no trainable LoRA parameters. Refusing to train an inert adapter."
         )
     parameter_count = sum(int(parameter.numel()) for _, parameter in lora_parameters)
     if parameter_count <= 0:  # pragma: no cover - tensors cannot have negative size
-        raise SFTTrainingError("P4 LoRA adapter has no trainable parameters.")
+        raise PipelineError("P4 LoRA adapter has no trainable parameters.")
     logger.info(
         "P4 LoRA trainable parameters: %d tensors, %d parameters",
         len(lora_parameters),
@@ -211,7 +196,7 @@ def _validate_trainable_lora_parameters(model: Any) -> int:
 def load_sft_tokenizer(model_entry: ModelEntry) -> Any:
     token = get_hf_token()
     if model_entry.gated and not token:
-        raise SFTTrainingError(f"Model {model_entry.key} is gated and requires HF_TOKEN.")
+        raise PipelineError(f"Model {model_entry.key} is gated and requires HF_TOKEN.")
     tokenizer = AutoTokenizer.from_pretrained(
         model_entry.hf_id, token=token, trust_remote_code=True, padding_side="right"
     )
@@ -226,14 +211,14 @@ def load_sft_base_model(
 ) -> Any:
     token = get_hf_token()
     if model_entry.gated and not token:
-        raise SFTTrainingError(f"Model {model_entry.key} is gated and requires HF_TOKEN.")
+        raise PipelineError(f"Model {model_entry.key} is gated and requires HF_TOKEN.")
     quantization = settings["quantization"]
     use_bf16 = bool(settings["training"].get("bf16", True))
     world_size = distributed_world_size()
     process_index = local_process_index()
     if world_size > 1:
         if not torch.cuda.is_available():
-            raise SFTTrainingError("Distributed QLoRA requires CUDA.")
+            raise PipelineError("Distributed QLoRA requires CUDA.")
         from accelerate import PartialState
 
         timeout_minutes = int(settings["training"].get("distributed_timeout_minutes", 10))
@@ -243,8 +228,7 @@ def load_sft_base_model(
     if world_size > 1:
         device_map: str | dict[str, int] = {"": process_index}
     elif int(model_entry.tensor_parallel_size) > 1:
-        # A large single-process training model must be balanced across its
-        # assigned GPUs so rollout and reward models retain memory headroom.
+        # Balance a large single-process model across its assigned GPUs.
         device_map = "balanced"
     else:
         device_map = "auto"
@@ -258,7 +242,7 @@ def load_sft_base_model(
         storage_name = str(quantization.get("bnb_4bit_quant_storage", "uint8"))
         storage_dtype = getattr(torch, storage_name, None)
         if not isinstance(storage_dtype, torch.dtype):
-            raise SFTTrainingError(
+            raise PipelineError(
                 f"Unknown quantization.bnb_4bit_quant_storage dtype: {storage_name}"
             )
         load_kwargs["quantization_config"] = BitsAndBytesConfig(
@@ -305,10 +289,10 @@ def train_sft(
     max_train_examples: int | None = None,
     max_dev_examples: int | None = None,
 ) -> dict[str, str]:
-    """Fine-tune one registered causal LM with sft_train and sft_dev only."""
+    """Train one P4 adapter and select its checkpoint on SFT development data."""
     config = load_sft_config(config_path)["sft"]
     if dataset_key not in config["target_languages"]:
-        raise SFTTrainingError(f"Unsupported SFT dataset: {dataset_key}")
+        raise PipelineError(f"Unsupported SFT dataset: {dataset_key}")
     settings = resolve_sft_settings(config, model_key)
     model_entry = get_model_entry(model_key, models_config_path)
     target_lang = str(settings["target_languages"][dataset_key])
@@ -316,7 +300,7 @@ def train_sft(
     world_size = distributed_world_size()
     required_world_size = int(training.get("required_world_size", world_size))
     if world_size != required_world_size:
-        raise SFTTrainingError(
+        raise PipelineError(
             f"{model_key} SFT requires {required_world_size} distributed processes; "
             f"found {world_size}."
         )
@@ -327,7 +311,7 @@ def train_sft(
     )
     configured_batch_size = int(training.get("effective_batch_size", effective_batch_size))
     if effective_batch_size != configured_batch_size:
-        raise SFTTrainingError(
+        raise PipelineError(
             f"Effective SFT batch is {effective_batch_size}, not configured "
             f"{configured_batch_size}."
         )
@@ -341,7 +325,7 @@ def train_sft(
     for split, limit in (("train", max_train_examples), ("dev", max_dev_examples)):
         if limit is not None:
             if limit <= 0:
-                raise SFTTrainingError(f"max_{split}_examples must be positive.")
+                raise PipelineError(f"max_{split}_examples must be positive.")
             records[split] = records[split][:limit]
     adapter_dir = Path(adapter_root or settings["adapter_root"]) / dataset_key / model_key
     if adapter_dir.exists() and not resume_from_checkpoint:
@@ -354,7 +338,7 @@ def train_sft(
     try:
         from peft import LoraConfig, get_peft_model, prepare_model_for_kbit_training
     except ImportError as exc:  # pragma: no cover
-        raise SFTTrainingError("peft is required for SFT.") from exc
+        raise PipelineError("peft is required for SFT.") from exc
     if bool(settings["quantization"].get("load_in_4bit", False)):
         gradient_checkpointing = bool(training.get("gradient_checkpointing", False))
         gradient_checkpointing_kwargs = dict(training.get("gradient_checkpointing_kwargs", {}))

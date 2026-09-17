@@ -1,4 +1,4 @@
-"""Canonical chat records and tokenization for translation SFT."""
+"""Build and tokenize chat examples for translation SFT."""
 
 from __future__ import annotations
 
@@ -10,6 +10,7 @@ import torch
 from torch.utils.data import Dataset
 
 from src.utils.config import ModelEntry
+from src.utils.errors import PipelineError
 from src.utils.model_adapters import (
     build_prompt_text,
     build_supervised_translation_text,
@@ -17,18 +18,14 @@ from src.utils.model_adapters import (
 )
 
 
-class SFTDataError(RuntimeError):
-    """Raised when a required SFT chat record is malformed."""
-
-
 def load_jsonl_records(path: str | Path) -> list[dict[str, Any]]:
     file_path = Path(path)
     if not file_path.exists():
-        raise SFTDataError(f"SFT data file not found: {file_path}")
+        raise PipelineError(f"SFT data file not found: {file_path}")
     with file_path.open(encoding="utf-8") as handle:
         records = [json.loads(line) for line in handle if line.strip()]
     if not records:
-        raise SFTDataError(f"SFT data file is empty: {file_path}")
+        raise PipelineError(f"SFT data file is empty: {file_path}")
     return records
 
 
@@ -37,11 +34,11 @@ def build_chat_record(
     target_lang: str,
     prompt_spec: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
-    """Convert one ordered parallel example into a model-neutral chat record."""
+    """Convert one parallel example into a chat record."""
     required = {"id", "source", "target"}
     missing = required - set(record)
     if missing:
-        raise SFTDataError(f"Raw SFT record is missing fields: {sorted(missing)}")
+        raise PipelineError(f"Raw SFT record is missing fields: {sorted(missing)}")
     messages = build_translation_messages(
         str(record["source"]), target_lang=target_lang, prompt_spec=prompt_spec
     )
@@ -65,7 +62,7 @@ def _common_prefix_length(left: list[int], right: list[int]) -> int:
 
 
 class TranslationChatDataset(Dataset[dict[str, torch.Tensor]]):
-    """Tokenize canonical chats and mask prompt tokens from causal-LM loss."""
+    """Tokenize chats and mask prompt tokens from the training loss."""
 
     def __init__(
         self,
@@ -78,9 +75,9 @@ class TranslationChatDataset(Dataset[dict[str, torch.Tensor]]):
         prompt_spec: Mapping[str, Any] | None = None,
     ) -> None:
         if not records:
-            raise SFTDataError("SFT dataset is empty.")
+            raise PipelineError("SFT dataset is empty.")
         if max_seq_length <= 0:
-            raise SFTDataError("max_seq_length must be positive.")
+            raise PipelineError("max_seq_length must be positive.")
         self.records = records
         self.tokenizer = tokenizer
         self.model_entry = model_entry
@@ -123,7 +120,7 @@ class TranslationChatDataset(Dataset[dict[str, torch.Tensor]]):
         labels = list(full_ids)
         labels[:supervised_start] = [-100] * supervised_start
         if not any(token != -100 for token in labels):
-            raise SFTDataError(
+            raise PipelineError(
                 f"Example {record.get('id', index)} has no assistant tokens within max_seq_length. "
                 "Increase chat_format.max_seq_length."
             )
@@ -137,16 +134,14 @@ class TranslationChatDataset(Dataset[dict[str, torch.Tensor]]):
 class PackedTranslationChatDataset(Dataset[dict[str, torch.Tensor]]):
     """Pack consecutive complete SFT examples into sequences no longer than ``max_seq_length``."""
 
-    def __init__(
-        self, dataset: Dataset[dict[str, torch.Tensor]], max_seq_length: int
-    ) -> None:
+    def __init__(self, dataset: Dataset[dict[str, torch.Tensor]], max_seq_length: int) -> None:
         if max_seq_length <= 0:
-            raise SFTDataError("max_seq_length must be positive for sequence packing.")
+            raise PipelineError("max_seq_length must be positive for sequence packing.")
         self.original_examples = len(dataset)
         self.max_seq_length = max_seq_length
         self.features = self._pack(dataset)
         if not self.features:
-            raise SFTDataError("Sequence packing produced an empty SFT dataset.")
+            raise PipelineError("Sequence packing produced an empty SFT dataset.")
 
     def _pack(self, dataset: Dataset[dict[str, torch.Tensor]]) -> list[dict[str, torch.Tensor]]:
         packed: list[dict[str, torch.Tensor]] = []
@@ -156,9 +151,9 @@ class PackedTranslationChatDataset(Dataset[dict[str, torch.Tensor]]):
             values = {name: feature[name].tolist() for name in current}
             length = len(values["input_ids"])
             if length == 0:
-                raise SFTDataError(f"SFT feature {index} is empty and cannot be packed.")
+                raise PipelineError(f"SFT feature {index} is empty and cannot be packed.")
             if length > self.max_seq_length:
-                raise SFTDataError(
+                raise PipelineError(
                     f"SFT feature {index} has {length} tokens, above max_seq_length={self.max_seq_length}."
                 )
             if current["input_ids"] and len(current["input_ids"]) + length > self.max_seq_length:

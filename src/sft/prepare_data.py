@@ -1,4 +1,4 @@
-"""Convert ordered raw SFT splits to canonical chat-format JSONL."""
+"""Convert ordered SFT splits to chat-format JSONL."""
 
 from __future__ import annotations
 
@@ -19,7 +19,6 @@ def prepare_sft_chat_data(
     data_dir: str | Path | None = None,
     force: bool = False,
 ) -> dict[str, str]:
-    """Create canonical message JSONL for SFT train/dev data without reordering."""
     config = load_sft_config(config_path)["sft"]
     if dataset_key not in config["target_languages"]:
         raise ValueError(f"Unsupported SFT dataset: {dataset_key}")
@@ -63,7 +62,9 @@ def build_arg_parser() -> argparse.ArgumentParser:
 
 def main() -> None:
     args = build_arg_parser().parse_args()
-    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
+    logging.basicConfig(
+        level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s"
+    )
     datasets = ("en_eu", "en_ca") if args.dataset == "all" else (args.dataset,)
     for dataset_key in datasets:
         paths = prepare_sft_chat_data(dataset_key, args.config, args.data_dir, args.force)

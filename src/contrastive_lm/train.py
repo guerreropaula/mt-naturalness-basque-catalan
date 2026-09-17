@@ -12,29 +12,32 @@ from typing import Any
 import numpy as np
 import torch
 from torch.utils.data import Dataset
-from transformers import AutoModelForCausalLM, AutoTokenizer, BitsAndBytesConfig, Trainer, TrainingArguments
+from transformers import (
+    AutoModelForCausalLM,
+    AutoTokenizer,
+    BitsAndBytesConfig,
+    Trainer,
+    TrainingArguments,
+)
 
 from src.contrastive_lm.data import load_labeled_texts, validate_classifier_style_splits
 from src.utils.config import load_contrastive_lm_config
+from src.utils.errors import PipelineError
 from src.utils.hf_auth import get_hf_token
 from src.utils.io import save_json
 
 logger = logging.getLogger(__name__)
 
 
-class ContrastiveLMTrainingError(RuntimeError):
-    """Raised when HT/MT contrastive-LM training cannot be configured safely."""
-
-
 _SIDE_TO_KEY = {"ht": "ht", "mt": "mt"}
 
 
 class CausalTextDataset(Dataset[dict[str, torch.Tensor]]):
-    """Target-text-only causal-LM examples with full next-token supervision."""
+    """Causal-LM data with loss on every non-padding target token."""
 
     def __init__(self, texts: list[str], tokenizer: Any, max_length: int) -> None:
         if not texts:
-            raise ContrastiveLMTrainingError("Causal-LM dataset is empty.")
+            raise PipelineError("Causal-LM dataset is empty.")
         self.texts = texts
         self.tokenizer = tokenizer
         self.max_length = max_length
@@ -92,7 +95,7 @@ def _load_tokenizer(model_name: str) -> Any:
     if tokenizer.pad_token_id is None:
         tokenizer.pad_token = tokenizer.eos_token
     if tokenizer.pad_token_id is None:
-        raise ContrastiveLMTrainingError("Tokenizer must provide an EOS or PAD token.")
+        raise PipelineError("Tokenizer must provide an EOS or PAD token.")
     tokenizer.padding_side = "right"
     return tokenizer
 
@@ -114,7 +117,7 @@ def _prepare_lora_model(model: Any, config: dict[str, Any]) -> Any:
     try:
         from peft import LoraConfig, get_peft_model, prepare_model_for_kbit_training
     except ImportError as exc:  # pragma: no cover - project dependency
-        raise ContrastiveLMTrainingError("peft is required for contrastive-LM training.") from exc
+        raise PipelineError("peft is required for contrastive-LM training.") from exc
     if bool(config["model"]["load_in_4bit"]):
         model = prepare_model_for_kbit_training(
             model,
@@ -132,9 +135,11 @@ def _prepare_lora_model(model: Any, config: dict[str, Any]) -> Any:
             target_modules=list(lora["target_modules"]),
         ),
     )
-    trainable = sum(parameter.numel() for parameter in model.parameters() if parameter.requires_grad)
+    trainable = sum(
+        parameter.numel() for parameter in model.parameters() if parameter.requires_grad
+    )
     if trainable == 0:
-        raise ContrastiveLMTrainingError("LoRA setup produced no trainable parameters.")
+        raise PipelineError("LoRA setup produced no trainable parameters.")
     return model
 
 
@@ -143,12 +148,12 @@ def train_contrastive_lm(
     side: str,
     config_path: str | Path = "configs/contrastive_lm.yaml",
 ) -> dict[str, str]:
-    """Train one HT or MT adapter from the corresponding labeled chunk texts."""
+    """Train either the HT or the MT adapter."""
     if side not in _SIDE_TO_KEY:
-        raise ContrastiveLMTrainingError("side must be 'ht' or 'mt'.")
+        raise PipelineError("side must be 'ht' or 'mt'.")
     config = load_contrastive_lm_config(config_path)["contrastive_lm"]
     if dataset_key not in config["languages"]:
-        raise ContrastiveLMTrainingError(f"No contrastive-LM language config for {dataset_key}.")
+        raise PipelineError(f"No contrastive-LM language config for {dataset_key}.")
     split_counts = validate_classifier_style_splits(config["data_root"], dataset_key)
     label = int(config["labels"][side])
     train_texts = load_labeled_texts(config["data_root"], dataset_key, "train", label)
@@ -186,7 +191,9 @@ def train_contrastive_lm(
         load_best_model_at_end=True,
         metric_for_best_model="eval_loss",
         greater_is_better=False,
-        bf16=bool(training["bf16"]) and torch.cuda.is_available() and torch.cuda.is_bf16_supported(),
+        bf16=bool(training["bf16"])
+        and torch.cuda.is_available()
+        and torch.cuda.is_bf16_supported(),
         gradient_checkpointing=bool(training["gradient_checkpointing"]),
         report_to=[],
         remove_unused_columns=False,
@@ -239,8 +246,10 @@ def build_arg_parser() -> argparse.ArgumentParser:
 def main() -> None:
     args = build_arg_parser().parse_args()
     if bool(args.side) == bool(args.all_sides):
-        raise ContrastiveLMTrainingError("Choose exactly one of --side or --all-sides.")
-    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
+        raise PipelineError("Choose exactly one of --side or --all-sides.")
+    logging.basicConfig(
+        level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s"
+    )
     sides = (args.side,) if args.side else ("ht", "mt")
     for side in sides:
         logger.info("Training contrastive %s LM for %s", side, args.dataset)

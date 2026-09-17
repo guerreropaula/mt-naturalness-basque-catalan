@@ -1,4 +1,4 @@
-"""Automatic MT and translationese-oriented evaluation metrics."""
+"""Compute translation-quality and target-side naturalness metrics."""
 
 from __future__ import annotations
 
@@ -75,6 +75,7 @@ def compute_mtld(tokens: list[str], reliable_min_tokens: int = 100) -> float | N
     if len(tokens) < reliable_min_tokens:
         return None
     return float(ld.mtld(tokens))
+
 
 def compute_yules_k(tokens: list[str]) -> float | None:
     """Compute Yule's K lexical concentration measure."""
@@ -155,7 +156,7 @@ def compute_consecutive_repetition_rate(tokens: list[str]) -> float | None:
 
 
 def compute_content_word_repetition_rate(tokens: list[str]) -> float | None:
-    """Heuristic proxy until POS-based content/function tagging is added."""
+    """Approximate content-word repetition from alphabetic tokens longer than three characters."""
     if not tokens:
         return None
     content_like_tokens = [token for token in tokens if token.isalpha() and len(token) > 3]
@@ -334,7 +335,7 @@ def compute_repeated_source_translation_choice_metrics(
 
 
 def compute_translation_choice_metrics(df: pd.DataFrame) -> dict[str, float | None]:
-    """Backward-compatible alias for the repeated-source concentration proxy."""
+    """Alias for the repeated-source concentration measure."""
     return compute_repeated_source_translation_choice_metrics(df)
 
 
@@ -512,8 +513,7 @@ def compute_optional_comet(
         )
         return _extract_comet_system_score(outputs)
     finally:
-        # Lightning may retain references to the prediction trainer. Drop every
-        # caller-owned reference before loading the next large COMET checkpoint.
+        # Release the prediction trainer before loading another COMET checkpoint.
         outputs = None
         model = None
         _release_comet_model_cache()
@@ -616,7 +616,9 @@ def compute_optional_metricx(
         return None
 
     if len(scores) != len(predictions):
-        logger.warning("MetricX returned %d scores for %d predictions.", len(scores), len(predictions))
+        logger.warning(
+            "MetricX returned %d scores for %d predictions.", len(scores), len(predictions)
+        )
         return None
     return float(sum(scores) / len(scores))
 
@@ -697,9 +699,7 @@ def compute_automatic_metrics(
         if references and sources
         else None
     )
-    # COMETKiwi is reference-free quality estimation, so the human reference
-    # itself can be scored as a target-side translation of the source. This is
-    # an observed baseline, unlike self-BLEU/chrF/TER, which would be trivial.
+    # COMETKiwi can score the human reference against the source because it is reference-free.
     reference_cometkiwi_score = (
         compute_optional_comet(
             sources,

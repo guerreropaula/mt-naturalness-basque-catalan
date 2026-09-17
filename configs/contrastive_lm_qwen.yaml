@@ -1,6 +1,5 @@
 contrastive_lm:
-  # Same chunk data as the classifier and BLOOM contrastive condition.
-  # This separate root keeps A3v3 (BLOOM) reproducible.
+  # Five-sentence SFT-hard-negative chunks shared with classifier v2 and A3v3.
   data_root: data/classifier_chunks/sft5
   adapter_root: models/contrastive_lm_qwen
   results_root: results/contrastive_lm_qwen

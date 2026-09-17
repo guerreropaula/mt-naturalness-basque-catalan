@@ -5,11 +5,12 @@ from __future__ import annotations
 import logging
 from typing import Any
 
+from src.evaluation.metrics.automatic import compute_ttr
 from src.evaluation.metrics.lexical import (
     compute_annotation_diversity_metrics,
     compute_lemma_wordform_diversity,
 )
-from src.evaluation.metrics.automatic import compute_ttr
+from src.utils.errors import PipelineError
 
 logger = logging.getLogger(__name__)
 
@@ -17,16 +18,12 @@ CONTENT_UPOS = {"NOUN", "PROPN", "VERB", "ADJ", "ADV"}
 FUNCTION_UPOS = {"DET", "PRON", "ADP", "AUX", "CCONJ", "SCONJ", "PART"}
 
 
-class StanzaAnalysisError(RuntimeError):
-    """Raised when Stanza-based annotation cannot be completed."""
-
-
 def load_stanza_pipeline(lang: str, use_gpu: bool = False) -> Any:
     """Load a Stanza pipeline for tokenization, POS, lemma, morphology, and dependencies."""
     try:  # pragma: no cover - dependent on local Stanza resources
         import stanza
     except Exception as exc:  # pragma: no cover
-        raise StanzaAnalysisError("stanza is required for syntactic analysis") from exc
+        raise PipelineError("stanza is required for syntactic analysis") from exc
 
     try:  # pragma: no cover
         return stanza.Pipeline(
@@ -37,7 +34,7 @@ def load_stanza_pipeline(lang: str, use_gpu: bool = False) -> Any:
             verbose=False,
         )
     except Exception as exc:  # pragma: no cover
-        raise StanzaAnalysisError(
+        raise PipelineError(
             f"Could not initialize a Stanza pipeline for language '{lang}'. "
             "Make sure the corresponding Stanza model has been downloaded."
         ) from exc
@@ -55,7 +52,7 @@ def annotate_texts(
         try:  # pragma: no cover - depends on runtime model state
             document = pipeline(text)
         except Exception as exc:  # pragma: no cover
-            raise StanzaAnalysisError(f"Stanza annotation failed for text: {text!r}") from exc
+            raise PipelineError(f"Stanza annotation failed for text: {text!r}") from exc
         sentence_tokens: list[dict[str, Any]] = []
         for sentence in document.sentences:
             for word in sentence.words:

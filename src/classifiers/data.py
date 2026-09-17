@@ -1,4 +1,4 @@
-"""Build ordered, disjoint target-side classifier data from unused corpus rows."""
+"""Build disjoint classifier splits from corpus rows not used elsewhere."""
 
 from __future__ import annotations
 
@@ -11,7 +11,7 @@ from typing import Any, Iterable
 
 import pandas as pd
 
-from src.data.loaders import load_dataset
+from src.data.loaders import load_dataset, load_processed_split
 from src.data.normalization import normalize_text
 from src.data.preprocessing import (
     basic_text_rejection_reason,
@@ -19,15 +19,11 @@ from src.data.preprocessing import (
     load_fasttext_model,
     predict_language,
 )
-from src.prompting._shared import load_processed_split
 from src.utils.config import get_dataset_entry, load_classifier_config, load_preprocessing_config
+from src.utils.errors import PipelineError
 from src.utils.io import save_json, save_jsonl
 
 logger = logging.getLogger(__name__)
-
-
-class ClassifierQualityError(RuntimeError):
-    """Raised when COMETKiwi quality scoring for classifier positives fails."""
 
 
 _COMET_MODEL_CACHE: dict[str, Any] = {}
@@ -47,9 +43,7 @@ def _load_quality_model(model_name: str) -> Any:
     try:
         from comet import download_model, load_from_checkpoint
     except Exception as exc:
-        raise ClassifierQualityError(
-            "COMET is required for Catalan classifier-positive filtering."
-        ) from exc
+        raise PipelineError("COMET is required for Catalan classifier-positive filtering.") from exc
     model = load_from_checkpoint(download_model(model_name))
     _COMET_MODEL_CACHE[model_name] = model
     return model
@@ -59,8 +53,7 @@ def _score_quality_batch(
     sources: list[str], targets: list[str], quality_config: dict[str, Any]
 ) -> list[float]:
     records = [
-        {"src": source, "mt": target}
-        for source, target in zip(sources, targets, strict=True)
+        {"src": source, "mt": target} for source, target in zip(sources, targets, strict=True)
     ]
     outputs = _load_quality_model(str(quality_config["model"])).predict(
         records,
@@ -73,16 +66,10 @@ def _score_quality_batch(
     elif isinstance(outputs, dict) and "scores" in outputs:
         scores = [float(score) for score in outputs["scores"]]
     else:
-        raise ClassifierQualityError("COMETKiwi output has no per-example scores.")
+        raise PipelineError("COMETKiwi output has no per-example scores.")
     if len(scores) != len(records):
-        raise ClassifierQualityError(
-            f"COMETKiwi returned {len(scores)} scores for {len(records)} records."
-        )
+        raise PipelineError(f"COMETKiwi returned {len(scores)} scores for {len(records)} records.")
     return scores
-
-
-class ClassifierDataError(RuntimeError):
-    """Raised when classifier data cannot be built safely."""
 
 
 @dataclass(frozen=True)
@@ -113,7 +100,7 @@ def classifier_sizes(config: dict[str, Any], size_mode: str) -> PairSplitSizes:
             test=int(values["test_pairs"]),
         )
     except (KeyError, TypeError, ValueError) as exc:
-        raise ClassifierDataError(f"Unknown or invalid classifier size mode: {size_mode}") from exc
+        raise PipelineError(f"Unknown or invalid classifier size mode: {size_mode}") from exc
 
 
 def _existing_records(dataset_key: str, processed_dir: str | Path) -> list[dict[str, str]]:
@@ -130,7 +117,7 @@ def _existing_records(dataset_key: str, processed_dir: str | Path) -> list[dict[
         required = {"sentence_id", "source", "target"}
         missing = required - set(frame.columns)
         if missing:
-            raise ClassifierDataError(
+            raise PipelineError(
                 f"Existing {dataset_key}/{split} split is missing columns: {sorted(missing)}"
             )
         records.extend(
@@ -184,7 +171,7 @@ def _overlap_reason(
     target: str,
     exclusions: dict[str, set[Any]],
 ) -> str | None:
-    """Return one deterministic first overlap reason, if any."""
+    """Return the first overlap category, or None."""
     if source_id in exclusions["source_id"]:
         return "source_id_already_allocated"
     if source in exclusions["source"]:
@@ -197,7 +184,6 @@ def _overlap_reason(
 
 
 def _initialise_selection_audit(audit: dict[str, Any] | None) -> Counter[str] | None:
-    """Initialise optional first-failure counters for a selection pass."""
     if audit is None:
         return None
     audit.clear()
@@ -225,11 +211,11 @@ def select_disjoint_classifier_pairs(
     language_model: Any,
     audit: dict[str, Any] | None = None,
 ) -> dict[str, list[dict[str, Any]]]:
-    """Select the first eligible unused pairs in original corpus order."""
+    """Select eligible unused pairs in corpus order."""
     required = {"original_index", "source", "target"}
     missing = required - set(raw_frame.columns)
     if missing:
-        raise ClassifierDataError(f"Raw corpus is missing columns: {sorted(missing)}")
+        raise PipelineError(f"Raw corpus is missing columns: {sorted(missing)}")
 
     exclusions = _exclusion_sets(existing_records)
     selected: list[dict[str, Any]] = []
@@ -276,7 +262,7 @@ def select_disjoint_classifier_pairs(
             break
 
     if len(selected) != sizes.total:
-        raise ClassifierDataError(
+        raise PipelineError(
             f"Only selected {len(selected)} unused valid rows; need {sizes.total} classifier pairs."
         )
     _finalise_selection_audit(audit, reasons, selected)
@@ -298,20 +284,20 @@ def select_quality_filtered_classifier_pairs(
     quality_config: dict[str, Any],
     audit: dict[str, Any],
 ) -> dict[str, list[dict[str, Any]]]:
-    """Fill classifier splits from unused domain-matched rows above a QE threshold."""
+    """Fill splits with unused, domain-matched rows that pass the COMETKiwi threshold."""
     required = {"original_index", "source", "target", "domain"}
     missing = required - set(raw_frame.columns)
     if missing:
-        raise ClassifierDataError(f"Raw corpus is missing columns: {sorted(missing)}")
+        raise PipelineError(f"Raw corpus is missing columns: {sorted(missing)}")
 
     domain_config = dict(preprocessing_config.get("domain_filtering", {}))
     allowed_domains = {str(value) for value in domain_config.get("allowed_values", [])}
     if not allowed_domains:
-        raise ClassifierDataError("Catalan classifier selection requires allowed domains.")
+        raise PipelineError("Catalan classifier selection requires allowed domains.")
     threshold = float(quality_config["threshold"])
     candidate_batch_size = int(quality_config.get("candidate_batch_size", 4096))
     if candidate_batch_size < 1:
-        raise ClassifierDataError("positive_quality_filter.candidate_batch_size must be positive.")
+        raise PipelineError("positive_quality_filter.candidate_batch_size must be positive.")
 
     exclusions = _exclusion_sets(existing_records)
     considered = {name: set(values) for name, values in exclusions.items()}
@@ -400,7 +386,7 @@ def select_quality_filtered_classifier_pairs(
     flush_pending()
 
     if len(selected) != sizes.total:
-        raise ClassifierDataError(
+        raise PipelineError(
             f"Only selected {len(selected)} unused HRM/CUL rows with COMETKiwi >= "
             f"{threshold}; need {sizes.total} classifier pairs."
         )
@@ -430,7 +416,7 @@ def validate_no_overlap(
     classifier_splits: dict[str, list[dict[str, Any]]],
     existing_records: Iterable[dict[str, str]],
 ) -> dict[str, Any]:
-    """Prove disjointness against MT/SFT splits and among classifier splits."""
+    """Check that classifier splits do not overlap training data or each other."""
     existing = _exclusion_sets(existing_records)
     report: dict[str, Any] = {"existing_mt_sft": {}, "between_classifier_splits": {}}
     split_sets: dict[str, dict[str, set[Any]]] = {}
@@ -439,27 +425,27 @@ def validate_no_overlap(
             "source_id": {str(record["source_id"]) for record in records},
             "source": {str(record["source"]) for record in records},
             "target": {str(record["target"]) for record in records},
-            "pair": {
-                _pair_key(str(record["source"]), str(record["target"])) for record in records
-            },
+            "pair": {_pair_key(str(record["source"]), str(record["target"])) for record in records},
         }
         split_sets[split] = keys
         overlaps = {name: len(values & existing[name]) for name, values in keys.items()}
         report["existing_mt_sft"][split] = overlaps
         if any(overlaps.values()):
-            raise ClassifierDataError(f"Classifier {split} overlaps existing MT/SFT data: {overlaps}")
+            raise PipelineError(f"Classifier {split} overlaps existing MT/SFT data: {overlaps}")
     for left, right in (("train", "dev"), ("train", "test"), ("dev", "test")):
         overlaps = {
             name: len(split_sets[left][name] & split_sets[right][name]) for name in split_sets[left]
         }
         report["between_classifier_splits"][f"{left}_{right}"] = overlaps
         if any(overlaps.values()):
-            raise ClassifierDataError(f"Classifier split overlap {left}/{right}: {overlaps}")
+            raise PipelineError(f"Classifier split overlap {left}/{right}: {overlaps}")
     report["passed"] = True
     return report
 
 
-def _reference_examples(dataset_key: str, split: str, records: list[dict[str, Any]], language: str) -> list[dict[str, Any]]:
+def _reference_examples(
+    dataset_key: str, split: str, records: list[dict[str, Any]], language: str
+) -> list[dict[str, Any]]:
     return [
         {
             "id": f"{dataset_key}_cls_{split}_{index:06d}_ref",
@@ -488,7 +474,7 @@ def prepare_classifier_source_data(
     processed_dir: str | Path = "data/processed",
     force: bool = False,
 ) -> dict[str, str]:
-    """Create ordered unused source/reference pairs and reference positives."""
+    """Create source-reference pairs and human-translation examples."""
     classifier_config = load_classifier_config(classifier_config_path)
     preprocessing_config = load_preprocessing_config(preprocessing_config_path)
     dataset_entry = get_dataset_entry(dataset_key, datasets_config_path)
@@ -531,11 +517,16 @@ def prepare_classifier_source_data(
         pair_path = pairs_root / f"{split}.jsonl"
         reference_path = root / f"{split}.reference.jsonl"
         if not force and (pair_path.exists() or reference_path.exists()):
-            raise FileExistsError(f"Classifier split already exists: {pair_path} or {reference_path}")
+            raise FileExistsError(
+                f"Classifier split already exists: {pair_path} or {reference_path}"
+            )
         for record in records:
             record["split"] = split
         save_jsonl(records, pair_path)
-        save_jsonl(_reference_examples(dataset_key, split, records, dataset_entry["target_lang"]), reference_path)
+        save_jsonl(
+            _reference_examples(dataset_key, split, records, dataset_entry["target_lang"]),
+            reference_path,
+        )
         paths[f"{split}_pairs"] = str(pair_path)
         paths[f"{split}_reference"] = str(reference_path)
     overlap_path = pairs_root / "overlap_audit.json"
@@ -578,7 +569,9 @@ def prepare_classifier_source_data(
 
 
 def build_arg_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="Build disjoint ordered classifier source/reference splits.")
+    parser = argparse.ArgumentParser(
+        description="Build disjoint ordered classifier source/reference splits."
+    )
     parser.add_argument("--dataset", required=True, choices=("en_eu", "en_ca"))
     parser.add_argument("--size-mode", choices=("matched",), default="matched")
     parser.add_argument("--datasets-config", default="configs/datasets.yaml")
@@ -591,7 +584,9 @@ def build_arg_parser() -> argparse.ArgumentParser:
 
 def main() -> None:
     args = build_arg_parser().parse_args()
-    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
+    logging.basicConfig(
+        level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s"
+    )
     common = {
         "dataset_key": args.dataset,
         "size_mode": args.size_mode,

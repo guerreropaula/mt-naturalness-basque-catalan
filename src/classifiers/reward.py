@@ -1,4 +1,4 @@
-"""Optional target-side reference-likeness scoring for future GRPO rewards."""
+"""Target-side HT-likeness scoring for GRPO."""
 
 from __future__ import annotations
 
@@ -9,7 +9,7 @@ from transformers import AutoModelForSequenceClassification, AutoTokenizer
 
 
 class TargetSideReferenceLikenessScorer:
-    """Score target text as P(label=1), with no English source input."""
+    """Estimate P(human translation | target text)."""
 
     def __init__(
         self,
@@ -26,7 +26,6 @@ class TargetSideReferenceLikenessScorer:
 
     @torch.no_grad()
     def score(self, target_texts: list[str], batch_size: int = 64) -> list[float]:
-        """Return reference-likeness probabilities for target-language text only."""
         scores: list[float] = []
         for start in range(0, len(target_texts), batch_size):
             batch = self.tokenizer(

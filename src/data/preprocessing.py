@@ -13,23 +13,20 @@ import pandas as pd
 from src.data.loaders import load_dataset
 from src.data.normalization import normalize_text
 from src.utils.config import get_dataset_entry, load_preprocessing_config
+from src.utils.errors import PipelineError
 from src.utils.io import save_dataframe_jsonl, save_json
 
 logger = logging.getLogger(__name__)
-
-
-class LanguageIdError(RuntimeError):
-    """Raised when the configured fastText language-ID model is unavailable."""
 
 
 def load_fasttext_model(model_path: str):
     try:
         import fasttext
     except ImportError as exc:  # pragma: no cover - depends on environment
-        raise LanguageIdError("fasttext-wheel is required for preprocessing.") from exc
+        raise PipelineError("fasttext-wheel is required for preprocessing.") from exc
     path = Path(model_path)
     if not path.exists():
-        raise LanguageIdError(
+        raise PipelineError(
             f"fastText language-ID model not found: {path}. "
             "Download lid.176.ftz before running preprocessing."
         )
@@ -144,9 +141,7 @@ def preprocess_loaded_dataframe(
         source = "" if pd.isna(source) else str(source)
         target = "" if pd.isna(target) else str(target)
         metadata = {
-            column: getattr(row, column)
-            for column in metadata_columns
-            if hasattr(row, column)
+            column: getattr(row, column) for column in metadata_columns if hasattr(row, column)
         }
         row_id = _row_id(prefix, original_index)
         reason = None
@@ -172,7 +167,6 @@ def preprocess_loaded_dataframe(
                 seen_pairs.add(pair)
                 valid_rows += 1
 
-
         rows.append(
             {
                 "id": row_id,
@@ -187,7 +181,6 @@ def preprocess_loaded_dataframe(
         )
         if valid_rows >= requested_rows:
             break
-
 
     result = pd.DataFrame(rows)
     result.attrs["summary"] = {
@@ -228,6 +221,7 @@ def preprocess_loaded_dataframe(
             "train/test/LFP background."
         )
     return result
+
 
 def _ordered_splits(
     processed_df: pd.DataFrame, split_config: dict[str, Any]

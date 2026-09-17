@@ -58,7 +58,7 @@ def _metrics_path(
     model: str,
     evaluation_split: str = "test",
 ) -> Path:
-    """Return the canonical per-example metric path for a P0-P5 condition."""
+    """Return the per-example metric path for one P0-P5 condition."""
     key = str(label).strip().lower()
     key = {"p4": "p4_sft", "p5": "p5_grpo_a2", "p5_grpo": "p5_grpo_a2"}.get(key, key)
     project_root = results_root.parent if results_root.name == "p0_p3" else results_root
@@ -85,7 +85,18 @@ def _metrics_path(
             / evaluation_split
             / "per_example_metrics.jsonl"
         )
-    if key.startswith("p5_grpo_") and key.rsplit("_", 1)[1] in {"a0", "a1", "a2", "a3", "a4", "a3v2", "a3v3", "a3v4", "a3v5", "a5"}:
+    if key.startswith("p5_grpo_") and key.rsplit("_", 1)[1] in {
+        "a0",
+        "a1",
+        "a2",
+        "a3",
+        "a4",
+        "a3v2",
+        "a3v3",
+        "a3v4",
+        "a3v5",
+        "a5",
+    }:
         ablation = key.rsplit("_", 1)[1]
         return (
             project_root
@@ -238,7 +249,9 @@ def run_comparisons(
                         "baseline": baseline_label,
                         "candidate": candidate,
                         "metric": metric,
-                        "direction": "lower_is_better" if metric in _LOWER_IS_BETTER else "higher_is_better",
+                        "direction": "lower_is_better"
+                        if metric in _LOWER_IS_BETTER
+                        else "higher_is_better",
                         "status": "skipped",
                         "skip_reason": str(exc),
                         "paired_rows": 0,
@@ -306,13 +319,17 @@ def main() -> None:
     if args.bootstrap_iterations < 1 or args.randomization_iterations < 1:
         raise ValueError("Iteration counts must be positive.")
 
-    baseline_path = _metrics_path(args.results_root, baseline, args.dataset, args.model, args.evaluation_split)
+    baseline_path = _metrics_path(
+        args.results_root, baseline, args.dataset, args.model, args.evaluation_split
+    )
     if not baseline_path.exists():
         raise FileNotFoundError(f"Missing baseline per-example metrics at {baseline_path}")
     frames = {baseline: load_per_example_metrics(baseline_path)}
     available_candidates: list[str] = []
     for label in candidates:
-        path = _metrics_path(args.results_root, label, args.dataset, args.model, args.evaluation_split)
+        path = _metrics_path(
+            args.results_root, label, args.dataset, args.model, args.evaluation_split
+        )
         if not path.exists():
             print(f"Skipping {label}: missing per-example metrics at {path}")
             continue

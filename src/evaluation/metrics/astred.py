@@ -9,9 +9,7 @@ from typing import Any
 
 import pandas as pd
 
-
-class ASTrEDAnalysisError(RuntimeError):
-    """Raised when ASTrED-based analysis cannot be completed."""
+from src.utils.errors import PipelineError
 
 
 def _install_nltk_draw_tree_stub_if_needed() -> None:
@@ -37,7 +35,7 @@ def _load_astred_backend() -> tuple[Any, Any, Any]:
         astred_module = importlib.import_module("astred")
         astred_utils = importlib.import_module("astred.utils")
     except Exception as exc:
-        raise ASTrEDAnalysisError(
+        raise PipelineError(
             "astred is required for ASTrED analysis. Install it with `pip install astred`."
         ) from exc
 
@@ -46,7 +44,7 @@ def _load_astred_backend() -> tuple[Any, Any, Any]:
         aligned_sentences_cls = astred_module.AlignedSentences
         load_parser = astred_utils.load_parser
     except AttributeError as exc:
-        raise ASTrEDAnalysisError(
+        raise PipelineError(
             "The installed astred package does not expose the expected Sentence/AlignedSentences API."
         ) from exc
 
@@ -62,8 +60,7 @@ def _build_parsers(
 ) -> tuple[Any, Any]:
     parser_kwargs: dict[str, Any] = {}
     if parser == "stanza":
-        # ASTrED delegates parser loading to Stanza. Reuse the installed
-        # resources so queued jobs never depend on GitHub's resource index.
+        # Reuse installed Stanza models so cluster jobs do not need network access.
         parser_kwargs["download_method"] = None
 
     try:
@@ -85,7 +82,7 @@ def _build_parsers(
                 **parser_kwargs,
             )
     except Exception as exc:
-        raise ASTrEDAnalysisError(
+        raise PipelineError(
             "Could not initialize ASTrED parsing resources. "
             "For `parser='stanza'`, pass a language code such as `ca` or `eu`. "
             "For `parser='spacy'`, pass an installed model name such as `en_core_web_sm`."
@@ -145,7 +142,7 @@ def _non_null_pair_count(aligned_sentences: Any) -> int:
 
 
 def empty_astred_summary() -> dict[str, float | int | str | None]:
-    """Return the empty ASTrED summary block used in graceful fallbacks."""
+    """Return ASTrED fields with unavailable values."""
     return {
         "ted": None,
         "word_cross": None,
@@ -231,7 +228,9 @@ def _sentence_weight(sentence: Any) -> int:
 
 
 def _weighted_mean(values: list[float | int | None], weights: list[int]) -> float | None:
-    present = [(float(value), weight) for value, weight in zip(values, weights) if value is not None]
+    present = [
+        (float(value), weight) for value, weight in zip(values, weights) if value is not None
+    ]
     if not present:
         return None
     total_weight = sum(weight for _, weight in present)

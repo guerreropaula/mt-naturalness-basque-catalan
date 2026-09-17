@@ -12,22 +12,13 @@ from pathlib import Path
 from typing import Any, Mapping
 
 from src.utils.config import ModelEntry, get_model_entry
+from src.utils.errors import PipelineError
 from src.utils.hf_auth import get_hf_token
 from src.utils.model_adapters import build_prompt_text
 
 
-class ModelLoadError(RuntimeError):
-    """Raised when a configured model cannot be loaded for inference."""
-
-
-class GenerationError(RuntimeError):
-    """Raised when batched generation fails."""
-
-
 @dataclass
 class LoadedModel:
-    """Lightweight handle for backend-specific inference objects."""
-
     model_entry: ModelEntry
     backend: str
     model: Any
@@ -81,7 +72,7 @@ def _build_quantization_config(quantization: str | None) -> Any | None:
     try:  # pragma: no cover - bitsandbytes may be unavailable in tests/runtime
         from transformers import BitsAndBytesConfig
     except Exception as exc:  # pragma: no cover
-        raise ModelLoadError(
+        raise PipelineError(
             "4-bit quantization was requested but BitsAndBytesConfig is unavailable"
         ) from exc
     return BitsAndBytesConfig(load_in_4bit=True)
@@ -93,15 +84,15 @@ def load_inference_model(
     generation_config: dict[str, Any] | None = None,
     adapter_path: str | os.PathLike[str] | None = None,
 ) -> LoadedModel:
-    """Load a configured model for inference using the selected backend."""
+    """Load a registry model with its configured inference backend."""
     model_entry = get_model_entry(model_key, models_config_path)
     if not model_entry.is_id_confirmed:
-        raise ModelLoadError(
+        raise PipelineError(
             f"Model '{model_key}' has hf_id=TO_BE_CONFIRMED and cannot be loaded yet."
         )
     hf_token = get_hf_token()
     if model_entry.gated and not hf_token:
-        raise ModelLoadError(
+        raise PipelineError(
             f"Model '{model_key}' is gated and requires HF_TOKEN in the environment."
         )
 
@@ -109,14 +100,14 @@ def load_inference_model(
     seed = int(generation_config.get("seed", 42))
     if model_entry.backend == "transformers":
         if adapter_path is not None:
-            raise ModelLoadError(
+            raise PipelineError(
                 "Adapter-aware shared inference is only implemented for the vLLM backend."
             )
         _set_random_seed(seed)
         return _load_transformers_model(model_entry)
     if model_entry.backend == "vllm":
         return _load_vllm_model(model_entry, seed=seed, adapter_path=adapter_path)
-    raise ModelLoadError(
+    raise PipelineError(
         f"Backend '{model_entry.backend}' is not supported for local baseline inference."
     )
 
@@ -127,7 +118,7 @@ def _load_transformers_model(model_entry: ModelEntry) -> LoadedModel:
     try:  # pragma: no cover - actual imports are mocked in tests
         from transformers import AutoModelForCausalLM, AutoTokenizer
     except Exception as exc:  # pragma: no cover
-        raise ModelLoadError("transformers is required for the transformers backend") from exc
+        raise PipelineError("transformers is required for the transformers backend") from exc
 
     tokenizer = AutoTokenizer.from_pretrained(
         model_entry.hf_id,
@@ -137,10 +128,8 @@ def _load_transformers_model(model_entry: ModelEntry) -> LoadedModel:
     )
     if getattr(tokenizer, "pad_token_id", None) is None:
         tokenizer.pad_token = tokenizer.eos_token
-    # Belt-and-suspenders: some tokenizer/version combos don't fully honor
-    # the padding_side kwarg passed to from_pretrained, so set it explicitly
-    # on the instance as well. Decoder-only models require left-padding so
-    # that generation continues immediately after the real (non-pad) tokens.
+    # Decoder-only generation needs left padding. Some tokenizer versions ignore
+    # the loader argument.
     tokenizer.padding_side = "left"
 
     load_kwargs: dict[str, Any] = {
@@ -157,10 +146,7 @@ def _load_transformers_model(model_entry: ModelEntry) -> LoadedModel:
 
     model = AutoModelForCausalLM.from_pretrained(model_entry.hf_id, **load_kwargs)
 
-    # Strip checkpoint-default sampling params (some checkpoints ship a
-    # generation_config.json with temperature/top_p set) so they don't
-    # trigger "generation flags not valid" warnings when we run greedy
-    # decoding with do_sample=False.
+    # Clear checkpoint sampling defaults before greedy decoding.
     model.generation_config.do_sample = False
     model.generation_config.temperature = None
     model.generation_config.top_p = None
@@ -187,7 +173,9 @@ def _load_gemma3_model(model_entry: ModelEntry) -> LoadedModel:
     try:  # pragma: no cover - actual imports are mocked in tests
         from transformers import AutoProcessor, Gemma3ForConditionalGeneration
     except Exception as exc:  # pragma: no cover
-        raise ModelLoadError("Gemma 3 requires AutoProcessor and Gemma3ForConditionalGeneration") from exc
+        raise PipelineError(
+            "Gemma 3 requires AutoProcessor and Gemma3ForConditionalGeneration"
+        ) from exc
 
     load_kwargs: dict[str, Any] = {
         "device_map": "auto",
@@ -228,13 +216,12 @@ def _load_vllm_model(
     seed: int,
     adapter_path: str | os.PathLike[str] | None = None,
 ) -> LoadedModel:
-    # vLLM launches a CUDA-owning worker process. Initializing CUDA in this
-    # parent process makes a forked worker fail, so configure spawning first.
+    # Select spawn before CUDA initialization because vLLM starts a CUDA worker process.
     os.environ.setdefault("VLLM_WORKER_MULTIPROC_METHOD", "spawn")
     try:  # pragma: no cover - optional dependency
         from vllm import LLM
     except Exception as exc:  # pragma: no cover
-        raise ModelLoadError("vLLM backend requested but vllm is not installed") from exc
+        raise PipelineError("vLLM backend requested but vllm is not installed") from exc
 
     llm_kwargs: dict[str, Any] = {}
     lora_request = None
@@ -243,18 +230,18 @@ def _load_vllm_model(
         resolved_adapter_path = Path(adapter_path).resolve()
         config_path = resolved_adapter_path / "adapter_config.json"
         if not config_path.is_file():
-            raise ModelLoadError(f"LoRA adapter configuration not found: {config_path}")
+            raise PipelineError(f"LoRA adapter configuration not found: {config_path}")
         try:
             adapter_config = json.loads(config_path.read_text(encoding="utf-8"))
             lora_rank = int(adapter_config["r"])
         except (KeyError, TypeError, ValueError, json.JSONDecodeError) as exc:
-            raise ModelLoadError(f"Invalid LoRA adapter configuration: {config_path}") from exc
+            raise PipelineError(f"Invalid LoRA adapter configuration: {config_path}") from exc
         if lora_rank <= 0:
-            raise ModelLoadError(f"LoRA rank must be positive in {config_path}")
+            raise PipelineError(f"LoRA rank must be positive in {config_path}")
         try:
             from vllm.lora.request import LoRARequest
         except Exception as exc:  # pragma: no cover - optional dependency
-            raise ModelLoadError("The installed vLLM build does not provide LoRA inference") from exc
+            raise PipelineError("The installed vLLM build does not provide LoRA inference") from exc
         llm_kwargs.update(
             enable_lora=True,
             max_lora_rank=lora_rank,
@@ -274,20 +261,18 @@ def _load_vllm_model(
         try:
             value = float(memory_utilization)
         except ValueError as exc:
-            raise ModelLoadError(
+            raise PipelineError(
                 "VLLM_GPU_MEMORY_UTILIZATION must be a floating-point value in (0, 1)."
             ) from exc
         if not 0.0 < value < 1.0:
-            raise ModelLoadError("VLLM_GPU_MEMORY_UTILIZATION must be in (0, 1).")
+            raise PipelineError("VLLM_GPU_MEMORY_UTILIZATION must be in (0, 1).")
         llm_kwargs["gpu_memory_utilization"] = value
 
     enforce_eager = os.environ.get("VLLM_ENFORCE_EAGER")
     if enforce_eager is not None:
         normalized = enforce_eager.strip().lower()
         if normalized not in {"0", "1", "false", "true"}:
-            raise ModelLoadError(
-                "VLLM_ENFORCE_EAGER must be one of: 0, 1, false, true."
-            )
+            raise PipelineError("VLLM_ENFORCE_EAGER must be one of: 0, 1, false, true.")
         llm_kwargs["enforce_eager"] = normalized in {"1", "true"}
 
     llm = LLM(
@@ -324,7 +309,7 @@ def _load_vllm_model(
 
 
 def release_inference_model(loaded_model: LoadedModel) -> None:
-    """Release backend resources before loading another inference model."""
+    """Release model and CUDA memory before another model is loaded."""
     if loaded_model.backend == "vllm":
         engine = getattr(loaded_model.model, "llm_engine", None)
         client = getattr(engine, "engine_core", None)
@@ -351,9 +336,9 @@ def render_translation_prompts(
     prompt_spec: Mapping[str, Any] | None = None,
     extra_template_contexts: list[Mapping[str, Any] | None] | None = None,
 ) -> list[str]:
-    """Render baseline translation prompts for a batch of inputs."""
+    """Render translation prompts for a batch."""
     if extra_template_contexts is not None and len(extra_template_contexts) != len(source_texts):
-        raise GenerationError("extra_template_contexts must align one-to-one with source_texts")
+        raise PipelineError("extra_template_contexts must align one-to-one with source_texts")
     return [
         build_prompt_text(
             loaded_model.model_entry,
@@ -375,7 +360,7 @@ def generate_batch(
     prompts: list[str],
     generation_config: dict[str, Any],
 ) -> list[str]:
-    """Generate a deterministic batch of texts."""
+    """Generate one translation for each prompt."""
     start_time = time.perf_counter()
     try:
         if loaded_model.backend == "transformers":
@@ -383,10 +368,10 @@ def generate_batch(
         elif loaded_model.backend == "vllm":
             outputs = _generate_batch_vllm(loaded_model, prompts, generation_config)
         else:
-            raise GenerationError(f"Unsupported backend for generation: {loaded_model.backend}")
+            raise PipelineError(f"Unsupported backend for generation: {loaded_model.backend}")
     except RuntimeError as exc:
         if "out of memory" in str(exc).lower():
-            raise GenerationError(
+            raise PipelineError(
                 "Generation failed due to out-of-memory. Reduce batch_size or max_new_tokens."
             ) from exc
         raise
@@ -402,7 +387,7 @@ def _generate_batch_transformers(
 ) -> list[str]:
     tokenizer = loaded_model.tokenizer
     if tokenizer is None:
-        raise GenerationError("Transformers backend requires a tokenizer")
+        raise PipelineError("Transformers backend requires a tokenizer")
 
     if loaded_model.model_entry.family == "gemma3":
         batch = tokenizer(text=prompts, return_tensors="pt", padding=True, truncation=True)
@@ -412,10 +397,8 @@ def _generate_batch_transformers(
             return_tensors="pt",
             padding=True,
             truncation=True,
-            # Explicit override at call time: relying solely on the tokenizer
-            # instance's padding_side attribute is not always honored by
-            # the tokenizer implementation/version, which produced the
-            # right-padding warning for decoder-only models.
+            # Pass left padding explicitly because some tokenizer versions ignore
+            # the instance setting.
             padding_side="left",
         )
 
@@ -430,9 +413,7 @@ def _generate_batch_transformers(
             model_inputs = dict(batch)
 
     input_ids = batch["input_ids"]
-    # With left-padding, every sequence in the batch ends at the same final
-    # column, so the prompt length is simply the padded sequence length and
-    # new tokens are whatever comes after column `prompt_length` for all rows.
+    # With left padding, generated tokens begin after the shared padded prompt length.
     prompt_length = (
         int(input_ids.shape[1])
         if hasattr(input_ids, "shape") and len(input_ids.shape) > 1

@@ -11,28 +11,20 @@ from typing import Any, Protocol
 import sacrebleu
 import torch
 
+from src.utils.errors import PipelineError
+
 logger = logging.getLogger(__name__)
 
 
-class GRPORewardError(RuntimeError):
-    """Raised when a GRPO reward batch is malformed or cannot be scored."""
-
-
 class QualityEstimationScorer(Protocol):
-    """Protocol for reference-free source/candidate quality-estimation scorers."""
-
     def score(self, sources: list[str], candidates: list[str]) -> list[float]: ...
 
 
 class NaturalnessScorer(Protocol):
-    """Protocol for target-side reference-likeness scorers."""
-
     def score(self, target_texts: list[str], batch_size: int = 64) -> list[float]: ...
 
 
 class ReferenceBasedQualityScorer(Protocol):
-    """Protocol for source/candidate/reference MT-quality scorers."""
-
     def score(
         self, sources: list[str], candidates: list[str], references: list[str]
     ) -> list[float]: ...
@@ -69,10 +61,10 @@ class RewardWeights:
     def validate(self) -> None:
         values = self.as_dict()
         if any(value < 0.0 for value in values.values()):
-            raise GRPORewardError(f"Reward weights must be non-negative: {values}")
+            raise PipelineError(f"Reward weights must be non-negative: {values}")
         total = sum(values.values())
         if not math.isclose(total, 1.0, rel_tol=0.0, abs_tol=1e-8):
-            raise GRPORewardError(f"Reward weights must sum to 1.0, found {total}: {values}")
+            raise PipelineError(f"Reward weights must sum to 1.0, found {total}: {values}")
 
     def as_dict(self) -> dict[str, float]:
         return {
@@ -88,7 +80,7 @@ class RewardWeights:
 
 @dataclass(frozen=True)
 class RewardBatch:
-    """Per-completion reward components retained for trainer logging and audits."""
+    """Per-completion reward components retained for trainer logging."""
 
     total: list[float]
     chrfpp: list[float]
@@ -114,7 +106,7 @@ class RewardBatch:
 
 def _clip_unit_interval(value: float) -> float:
     if not math.isfinite(value):
-        raise GRPORewardError(f"Reward component must be finite, found {value!r}")
+        raise PipelineError(f"Reward component must be finite, found {value!r}")
     return min(max(float(value), 0.0), 1.0)
 
 
@@ -130,9 +122,7 @@ def completion_text(completion: Any) -> str:
         for message in reversed(completion):
             if isinstance(message, Mapping) and message.get("content") is not None:
                 return str(message["content"])
-    raise GRPORewardError(
-        f"Cannot extract text from completion of type {type(completion).__name__}"
-    )
+    raise PipelineError(f"Cannot extract text from completion of type {type(completion).__name__}")
 
 
 def sentence_chrfpp(candidate: str, reference: str) -> float:
@@ -152,9 +142,9 @@ def sentence_bleu_unit_interval(candidate: str, reference: str) -> float:
 def self_bleu_diversity(candidates: Sequence[str], group_size: int) -> list[float]:
     """Return 1 - mean pairwise sentence BLEU for every contiguous GRPO group."""
     if group_size < 2:
-        raise GRPORewardError("Self-BLEU diversity requires group_size >= 2.")
+        raise PipelineError("Self-BLEU diversity requires group_size >= 2.")
     if len(candidates) % group_size:
-        raise GRPORewardError(
+        raise PipelineError(
             f"Expected a whole number of GRPO groups of {group_size}, got {len(candidates)} completions."
         )
 
@@ -183,62 +173,60 @@ def length_log_ratio_penalty(candidate: str, reference: str) -> float:
 
 
 def is_lexically_valid_translation(candidate: str, reference: str) -> bool:
-    """Reject non-lexical output only when the reference itself is lexical.
-
-    A punctuation-only reference can be translated as punctuation. Otherwise, a
-    punctuation- or digit-only sampled completion is not a translation and must
-    not exploit a target-side naturalness classifier or Self-BLEU reward.
-    """
+    """Reject non-lexical output when the reference contains letters."""
     reference_has_letters = any(character.isalpha() for character in str(reference))
     candidate_has_letters = any(character.isalpha() for character in str(candidate))
     return not reference_has_letters or candidate_has_letters
 
 
-class COMETKiwiScorer:
-    """Lazy sentence-level COMETKiwi quality-estimation scorer using source and candidate.
+class COMETScorer:
+    """Reusable sentence-level COMET or COMETKiwi scorer."""
 
-    The public COMET ``predict`` helper creates a PyTorch Lightning trainer for
-    every call. GRPO invokes a reward function for every sampled batch, so that
-    setup dominated the training time. This scorer instead reuses the loaded
-    COMETKiwi module and calls its inference ``predict_step`` directly.
-    """
-
-    def __init__(self, model_name: str, batch_size: int = 4, gpus: int = 1) -> None:
+    def __init__(
+        self,
+        model_name: str,
+        batch_size: int = 4,
+        gpus: int = 1,
+        reference_based: bool = False,
+    ) -> None:
         self.model_name = str(model_name)
         self.batch_size = int(batch_size)
         self.gpus = int(gpus)
+        self.reference_based = bool(reference_based)
         self._model: Any | None = None
         self._device: Any | None = None
+
+    @property
+    def label(self) -> str:
+        return "COMET" if self.reference_based else "COMETKiwi"
 
     @staticmethod
     def _move_to_device(value: Any, device: Any) -> Any:
         if hasattr(value, "to"):
             return value.to(device)
         if isinstance(value, Mapping):
-            return {
-                key: COMETKiwiScorer._move_to_device(item, device) for key, item in value.items()
-            }
+            return {key: COMETScorer._move_to_device(item, device) for key, item in value.items()}
         if isinstance(value, tuple):
-            return tuple(COMETKiwiScorer._move_to_device(item, device) for item in value)
+            return tuple(COMETScorer._move_to_device(item, device) for item in value)
         if isinstance(value, list):
-            return [COMETKiwiScorer._move_to_device(item, device) for item in value]
+            return [COMETScorer._move_to_device(item, device) for item in value]
         return value
 
     def _load_model(self) -> Any:
         if self._model is None:
             try:
-                from comet import download_model, load_from_checkpoint
                 import torch
-            except ImportError as exc:  # pragma: no cover - depends on optional runtime
-                raise GRPORewardError(
-                    "COMETKiwi reward requires unbabel-comet. Install the project GRPO extra."
+                from comet import download_model, load_from_checkpoint
+            except ImportError as exc:  # pragma: no cover - optional dependency
+                raise PipelineError(
+                    f"{self.label} reward requires unbabel-comet. Install the GRPO extra."
                 ) from exc
-            logger.info("Loading COMETKiwi reward model: %s", self.model_name)
+            logger.info("Loading %s reward model: %s", self.label, self.model_name)
             self._model = load_from_checkpoint(download_model(self.model_name))
             if self.gpus > 0:
                 if not torch.cuda.is_available():
-                    raise GRPORewardError(
-                        "COMETKiwi reward was configured for GPU scoring, but CUDA is unavailable."
+                    raise PipelineError(
+                        f"{self.label} was configured for GPU scoring, but CUDA is unavailable."
                     )
                 self._device = torch.device("cuda")
             else:
@@ -247,85 +235,56 @@ class COMETKiwiScorer:
             self._model.eval()
         return self._model
 
-    def _score_records(self, records: list[dict[str, str]], *, label: str) -> list[float]:
+    def _score_records(self, records: list[dict[str, str]]) -> list[float]:
         model = self._load_model()
-        if self._device is None:  # pragma: no cover - established with a loaded model
-            raise GRPORewardError(f"{label} scorer did not initialise an inference device.")
+        if self._device is None:  # pragma: no cover - set while loading
+            raise PipelineError(f"{self.label} did not initialise an inference device.")
         try:
             import torch
-        except ImportError as exc:  # pragma: no cover - project runtime dependency
-            raise GRPORewardError(f"{label} reward requires PyTorch.") from exc
+        except ImportError as exc:  # pragma: no cover - project dependency
+            raise PipelineError(f"{self.label} reward requires PyTorch.") from exc
 
         scores: list[float] = []
         for start in range(0, len(records), self.batch_size):
-            batch_records = records[start : start + self.batch_size]
-            prepared = model.prepare_sample(batch_records, stage="predict")
-            prepared = self._move_to_device(prepared, self._device)
+            batch = model.prepare_sample(records[start : start + self.batch_size], stage="predict")
+            batch = self._move_to_device(batch, self._device)
             with torch.inference_mode():
-                outputs = model.predict_step(prepared)
+                outputs = model.predict_step(batch)
             batch_scores = getattr(outputs, "scores", None)
             if batch_scores is None and isinstance(outputs, Mapping):
                 batch_scores = outputs.get("scores")
             if batch_scores is None:
-                raise GRPORewardError(f"{label} did not return sentence scores.")
+                raise PipelineError(f"{self.label} did not return sentence scores.")
             if hasattr(batch_scores, "detach"):
                 batch_scores = batch_scores.detach().float().cpu().tolist()
             scores.extend(float(score) for score in batch_scores)
 
         if len(scores) != len(records):
-            raise GRPORewardError(f"{label} did not return one sentence score per candidate.")
-        return [_clip_unit_interval(float(score)) for score in scores]
+            raise PipelineError(f"{self.label} did not return one score per candidate.")
+        return [_clip_unit_interval(score) for score in scores]
 
-    def score(self, sources: list[str], candidates: list[str]) -> list[float]:
+    def score(
+        self,
+        sources: list[str],
+        candidates: list[str],
+        references: list[str] | None = None,
+    ) -> list[float]:
         if len(sources) != len(candidates):
-            raise GRPORewardError("COMETKiwi inputs must have the same length.")
+            raise PipelineError(f"{self.label} inputs must have the same length.")
         records = [
             {"src": source, "mt": candidate}
             for source, candidate in zip(sources, candidates, strict=True)
         ]
-        return self._score_records(records, label="COMETKiwi")
-
-
-class COMETScorer(COMETKiwiScorer):
-    """Lazy reference-based COMET scorer using source, candidate, and reference."""
-
-    def _load_model(self) -> Any:
-        if self._model is None:
-            try:
-                from comet import download_model, load_from_checkpoint
-                import torch
-            except ImportError as exc:  # pragma: no cover - depends on optional runtime
-                raise GRPORewardError(
-                    "COMET reward requires unbabel-comet. Install the project GRPO extra."
-                ) from exc
-            logger.info("Loading reference-based COMET reward model: %s", self.model_name)
-            self._model = load_from_checkpoint(download_model(self.model_name))
-            if self.gpus > 0:
-                if not torch.cuda.is_available():
-                    raise GRPORewardError(
-                        "COMET reward was configured for GPU scoring, but CUDA is unavailable."
-                    )
-                self._device = torch.device("cuda")
-            else:
-                self._device = torch.device("cpu")
-            self._model.to(self._device)
-            self._model.eval()
-        return self._model
-
-    def score(
-        self, sources: list[str], candidates: list[str], references: list[str]
-    ) -> list[float]:
-        if not (len(sources) == len(candidates) == len(references)):
-            raise GRPORewardError("COMET inputs must have the same length.")
-        records = [
-            {"src": source, "mt": candidate, "ref": reference}
-            for source, candidate, reference in zip(sources, candidates, references, strict=True)
-        ]
-        return self._score_records(records, label="COMET")
+        if self.reference_based:
+            if references is None or len(references) != len(records):
+                raise PipelineError("COMET requires one reference per candidate.")
+            for record, reference in zip(records, references, strict=True):
+                record["ref"] = reference
+        return self._score_records(records)
 
 
 class TranslationGRPOReward:
-    """Weighted P5 translation reward compatible with TRL ``GRPOTrainer`` callables."""
+    """Compute the weighted P5 reward used by TRL GRPOTrainer."""
 
     def __init__(
         self,
@@ -337,31 +296,27 @@ class TranslationGRPOReward:
         classifier_batch_size: int = 64,
         empty_candidate_reward: float = -1.0,
     ) -> None:
-        # TRL records callable reward names from the reward instance.
         self.__name__ = "translation_grpo_reward"
         weights.validate()
         if group_size < 2:
-            raise GRPORewardError(
-                "GRPO reward requires at least two sampled completions per prompt."
-            )
+            raise PipelineError("GRPO reward requires at least two sampled completions per prompt.")
         if weights.cometkiwi > 0.0 and cometkiwi_scorer is None:
-            raise GRPORewardError("A positive COMETKiwi weight requires a COMETKiwi scorer.")
+            raise PipelineError("A positive COMETKiwi weight requires a COMETKiwi scorer.")
         if weights.comet > 0.0 and comet_scorer is None:
-            raise GRPORewardError("A positive COMET weight requires a reference-based COMET scorer.")
+            raise PipelineError("A positive COMET weight requires a reference-based COMET scorer.")
         if weights.reference_likeness > 0.0 and classifier_scorer is None:
-            raise GRPORewardError(
+            raise PipelineError(
                 "A positive reference-likeness weight requires a classifier scorer."
             )
         self.weights = weights
         self.group_size = int(group_size)
         if not math.isfinite(empty_candidate_reward):
-            raise GRPORewardError("empty_candidate_reward must be finite.")
+            raise PipelineError("empty_candidate_reward must be finite.")
         self.cometkiwi_scorer = cometkiwi_scorer
         self.comet_scorer = comet_scorer
         self.classifier_scorer = classifier_scorer
         self.classifier_batch_size = int(classifier_batch_size)
-        # This is a validity gate, not a fifth reward component: an EOS-only
-        # completion is not a translation and must not exploit metric rewards.
+        # EOS-only output is invalid, not a separate reward component.
         self.empty_candidate_reward = float(empty_candidate_reward)
 
     def score_batch(
@@ -375,16 +330,16 @@ class TranslationGRPOReward:
         reference_values = [str(value) for value in references]
         size = len(candidate_values)
         if not (len(source_values) == size == len(reference_values)):
-            raise GRPORewardError("Sources, candidates, and references must have the same length.")
+            raise PipelineError("Sources, candidates, and references must have the same length.")
         if size % self.group_size:
-            raise GRPORewardError(
+            raise PipelineError(
                 f"Reward batch size {size} is not divisible by group_size {self.group_size}."
             )
         for start in range(0, size, self.group_size):
             if len(set(source_values[start : start + self.group_size])) != 1:
-                raise GRPORewardError("Each contiguous GRPO group must share one source sentence.")
+                raise PipelineError("Each contiguous GRPO group must share one source sentence.")
             if len(set(reference_values[start : start + self.group_size])) != 1:
-                raise GRPORewardError(
+                raise PipelineError(
                     "Each contiguous GRPO group must share one reference translation."
                 )
 
@@ -402,7 +357,7 @@ class TranslationGRPOReward:
             else [0.0] * size
         )
         if len(cometkiwi) != size:
-            raise GRPORewardError("COMETKiwi scorer returned an unexpected number of scores.")
+            raise PipelineError("COMETKiwi scorer returned an unexpected number of scores.")
         cometkiwi = [_clip_unit_interval(score) for score in cometkiwi]
         comet = (
             self.comet_scorer.score(source_values, candidate_values, reference_values)
@@ -410,7 +365,7 @@ class TranslationGRPOReward:
             else [0.0] * size
         )
         if len(comet) != size:
-            raise GRPORewardError("COMET scorer returned an unexpected number of scores.")
+            raise PipelineError("COMET scorer returned an unexpected number of scores.")
         comet = [_clip_unit_interval(score) for score in comet]
         diversity = (
             self_bleu_diversity(candidate_values, self.group_size)
@@ -427,7 +382,7 @@ class TranslationGRPOReward:
             else [0.0] * size
         )
         if len(reference_likeness) != size:
-            raise GRPORewardError("Classifier scorer returned an unexpected number of scores.")
+            raise PipelineError("Classifier scorer returned an unexpected number of scores.")
         reference_likeness = [_clip_unit_interval(score) for score in reference_likeness]
 
         total = [
@@ -453,14 +408,16 @@ class TranslationGRPOReward:
             is_lexically_valid_translation(candidate, reference)
             for candidate, reference in zip(candidate_values, reference_values, strict=True)
         ]
-        # This is a validity gate, not an additional reward component. A non-empty
-        # punctuation-only string is as unusable as an EOS-only completion when the
-        # reference contains lexical content.
+        # Reject punctuation-only output when the reference contains words.
         total = [
             reward if candidate.strip() and valid else self.empty_candidate_reward
-            for candidate, valid, reward in zip(candidate_values, lexical_validity, total, strict=True)
+            for candidate, valid, reward in zip(
+                candidate_values, lexical_validity, total, strict=True
+            )
         ]
-        return RewardBatch(total, chrfpp, bleu, cometkiwi, comet, diversity, length, reference_likeness)
+        return RewardBatch(
+            total, chrfpp, bleu, cometkiwi, comet, diversity, length, reference_likeness
+        )
 
     def __call__(
         self,
@@ -469,11 +426,10 @@ class TranslationGRPOReward:
         reference: Sequence[str] | None = None,
         **kwargs: Any,
     ) -> list[float]:
-        """Score TRL completions while accepting standard and conversational datasets."""
         sources = source if source is not None else kwargs.get("sources")
         references = reference if reference is not None else kwargs.get("references")
         if sources is None or references is None:
-            raise GRPORewardError("TRL reward data must include source and reference columns.")
+            raise PipelineError("TRL reward data must include source and reference columns.")
         scored = self._score_distributed_batch(
             list(sources),
             [completion_text(value) for value in completions],
@@ -518,7 +474,7 @@ class TranslationGRPOReward:
                 result[0] = {"error": f"{type(exc).__name__}: {exc}"}
         torch.distributed.broadcast_object_list(result, src=0)
         if "error" in result[0]:
-            raise GRPORewardError(result[0]["error"])
+            raise PipelineError(result[0]["error"])
 
         start = sum(lengths[:rank])
         end = start + lengths[rank]
@@ -544,23 +500,24 @@ def build_translation_grpo_reward(
     comet_scorer: ReferenceBasedQualityScorer | None = None,
     classifier_scorer: NaturalnessScorer | None = None,
 ) -> TranslationGRPOReward:
-    """Build a configured P5 reward, lazily loading optional model-based scorers."""
+    """Build the configured reward and load only the scorers it uses."""
     root = config.get("grpo", config)
     reward_config = root["reward"]
     selected_ablation = str(ablation or reward_config["active_ablation"])
     ablations = reward_config["ablations"]
     if selected_ablation not in ablations:
-        raise GRPORewardError(
+        raise PipelineError(
             f"Unknown GRPO ablation '{selected_ablation}'. Available: {sorted(ablations)}"
         )
     weights = RewardWeights.from_mapping(ablations[selected_ablation]["weights"])
     kiwi = cometkiwi_scorer
     if weights.cometkiwi > 0.0 and kiwi is None:
         cometkiwi_config = reward_config["cometkiwi"]
-        kiwi = COMETKiwiScorer(
+        kiwi = COMETScorer(
             cometkiwi_config["model"],
             batch_size=int(cometkiwi_config["batch_size"]),
             gpus=int(cometkiwi_config["gpus"]),
+            reference_based=False,
         )
     comet = comet_scorer
     if weights.comet > 0.0 and comet is None:
@@ -569,6 +526,7 @@ def build_translation_grpo_reward(
             comet_config["model"],
             batch_size=int(comet_config["batch_size"]),
             gpus=int(comet_config["gpus"]),
+            reference_based=True,
         )
     naturalness = classifier_scorer
     if weights.reference_likeness > 0.0 and naturalness is None:
@@ -576,23 +534,23 @@ def build_translation_grpo_reward(
         contrastive_datasets = ablation_config.get("contrastive_lm_datasets")
         if contrastive_datasets is not None:
             if dataset_key not in set(contrastive_datasets):
-                raise GRPORewardError(
+                raise PipelineError(
                     f"Ablation '{selected_ablation}' does not support {dataset_key}; "
                     f"configured datasets: {list(contrastive_datasets)}."
                 )
             from src.contrastive_lm.reward import ContrastiveHTMTNaturalnessScorer
 
             naturalness = ContrastiveHTMTNaturalnessScorer(
-                dataset_key, ablation_config.get("contrastive_lm_config", "configs/contrastive_lm.yaml")
+                dataset_key,
+                ablation_config.get("contrastive_lm_config", "configs/contrastive_lm.yaml"),
             )
         else:
-            # Classifier ablations may pin a language-specific scorer. A3v2 is
-            # retained for historical chunk analysis; A3v5 is sentence-level.
+            # A3v2 uses five-sentence chunks; A3v5 uses sentence-level examples.
             model_dirs = ablation_config.get(
                 "classifier_model_dirs", reward_config["classifier"]["model_dirs"]
             )
             if dataset_key not in model_dirs:
-                raise GRPORewardError(
+                raise PipelineError(
                     f"No classifier model configured for {dataset_key} in ablation '{selected_ablation}'."
                 )
             from src.classifiers.reward import TargetSideReferenceLikenessScorer

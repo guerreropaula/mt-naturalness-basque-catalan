@@ -1,4 +1,4 @@
-"""Synonym Frequency Analysis (SFA) metrics and Apertium dictionary helpers."""
+"""Compute SFA metrics from Apertium translation dictionaries."""
 
 from __future__ import annotations
 
@@ -8,6 +8,8 @@ import xml.etree.ElementTree as ET
 from collections import Counter
 from pathlib import Path
 from typing import Any
+
+from src.utils.errors import PipelineError
 
 DEFAULT_SOURCE_UPOS = frozenset({"NOUN", "VERB", "ADJ"})
 _ROOT_DIR = Path(__file__).resolve().parents[2]
@@ -31,12 +33,8 @@ DEFAULT_APERTIUM_DICTIONARIES = {
 }
 
 
-class SFAAnalysisError(RuntimeError):
-    """Raised when SFA resources or computations are unavailable."""
-
-
 def empty_sfa_summary() -> dict[str, float | int | str | bool | None]:
-    """Return an empty, traceable SFA summary."""
+    """Return the empty SFA result used when the metric is unavailable."""
     return {
         "sfa_syn_ttr": None,
         "sfa_ptf": None,
@@ -81,7 +79,7 @@ def resolve_default_apertium_dictionary(target_lang: str) -> dict[str, Any]:
     """Return the default Apertium dictionary spec for a supported target language."""
     language_key = str(target_lang).strip().lower()
     if language_key not in DEFAULT_APERTIUM_DICTIONARIES:
-        raise SFAAnalysisError(
+        raise PipelineError(
             f"No default Apertium dictionary is configured for target language '{target_lang}'."
         )
     spec = dict(DEFAULT_APERTIUM_DICTIONARIES[language_key])
@@ -102,14 +100,12 @@ def load_apertium_translation_options(
     """Load translation options from an Apertium XML dictionary."""
     dictionary_path = Path(path)
     if not dictionary_path.exists():
-        raise SFAAnalysisError(f"Apertium dictionary not found: {dictionary_path}")
+        raise PipelineError(f"Apertium dictionary not found: {dictionary_path}")
 
     try:
         root = ET.parse(dictionary_path).getroot()
     except ET.ParseError as exc:
-        raise SFAAnalysisError(
-            f"Could not parse Apertium dictionary XML: {dictionary_path}"
-        ) from exc
+        raise PipelineError(f"Could not parse Apertium dictionary XML: {dictionary_path}") from exc
 
     translation_options: dict[str, set[str]] = {}
     for entry in root.iter("e"):
@@ -128,9 +124,7 @@ def load_apertium_translation_options(
             translation_options.setdefault(source_form, set()).update(target_forms)
 
     if not translation_options:
-        raise SFAAnalysisError(
-            f"No usable <l>/<r> bilingual entries were found in {dictionary_path}"
-        )
+        raise PipelineError(f"No usable <l>/<r> bilingual entries were found in {dictionary_path}")
     return translation_options
 
 
@@ -170,7 +164,7 @@ def collect_sfa_option_counts(
 ) -> dict[str, Any]:
     """Collect sentence-level dictionary-option counts for SFA metrics."""
     if len(source_annotations) != len(target_annotations):
-        raise SFAAnalysisError("Source and target annotation lists must have the same length.")
+        raise PipelineError("Source and target annotation lists must have the same length.")
 
     filtered_upos = set(source_upos or DEFAULT_SOURCE_UPOS)
     counts_by_source_lemma: dict[str, Counter[str]] = {}

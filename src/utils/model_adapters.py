@@ -1,4 +1,4 @@
-"""Model-family-specific prompt rendering helpers."""
+"""Render prompts with each model family's chat template."""
 
 from __future__ import annotations
 

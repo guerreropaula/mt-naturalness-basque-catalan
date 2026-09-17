@@ -1,4 +1,4 @@
-"""Generate clean P0 machine-translation negatives for classifier source splits."""
+"""Generate P0 translations used as classifier MT examples."""
 
 from __future__ import annotations
 
@@ -19,6 +19,7 @@ from src.utils.config import (
     load_generation_config,
     load_preprocessing_config,
 )
+from src.utils.errors import PipelineError
 from src.utils.io import save_json, save_jsonl
 from src.utils.model_loader import (
     generate_batch,
@@ -28,10 +29,6 @@ from src.utils.model_loader import (
 )
 
 logger = logging.getLogger(__name__)
-
-
-class NegativeGenerationError(RuntimeError):
-    """Raised when clean balanced MT negatives cannot be generated."""
 
 
 _COMMENTARY_RE = re.compile(
@@ -67,7 +64,7 @@ def clean_mt_reason(
     language_model: Any | None,
     confidence_threshold: float,
 ) -> str | None:
-    """Reject P0 outputs that are not a standalone target-language translation."""
+    """Return a reason when an output is not one target-language translation."""
     text = str(prediction).strip()
     if not text:
         return "empty"
@@ -106,7 +103,7 @@ def generate_mt_negatives(
     classifier_config_path: str | Path = "configs/classifier.yaml",
     force: bool = False,
 ) -> dict[str, str]:
-    """Generate one P0 negative per selected source pair and write balanced splits."""
+    """Generate one MT example per source and write balanced splits."""
     classifier_config = load_classifier_config(classifier_config_path)["classifier"]
     dataset_entry = get_dataset_entry(dataset_key, datasets_config_path)
     p0_prompt = dict(get_experiment_entry("p0_baseline", experiments_config_path)["prompt"])
@@ -114,10 +111,10 @@ def generate_mt_negatives(
     configured_models = classifier_config["negative_generation"]["model_keys"]
     model_keys = model_keys or [str(key) for key in configured_models]
     if len(set(model_keys)) < 2:
-        raise NegativeGenerationError("At least two negative-generation models are required.")
+        raise PipelineError("At least two negative-generation models are required.")
     max_attempts = int(classifier_config["negative_generation"]["max_attempts"])
     if max_attempts < 1:
-        raise NegativeGenerationError("max_attempts must be positive.")
+        raise PipelineError("max_attempts must be positive.")
 
     preprocessing_config = load_preprocessing_config(preprocessing_config_path)
     language_config = preprocessing_config["language_id"]
@@ -132,7 +129,7 @@ def generate_mt_negatives(
     for split in splits:
         records = _read_jsonl(pairs_root / f"{split}.jsonl")
         if not records:
-            raise NegativeGenerationError(f"No classifier source pairs found for {dataset_key}/{split}.")
+            raise PipelineError(f"No classifier source pairs found for {dataset_key}/{split}.")
         split_pairs[split] = records
         for position, record in enumerate(records, start=1):
             all_tasks.append(
@@ -180,7 +177,7 @@ def generate_mt_negatives(
                 )
                 outputs = generate_batch(loaded_model, prompts, generation_config)
                 if len(outputs) != len(batch):
-                    raise NegativeGenerationError(
+                    raise PipelineError(
                         f"{model_key} returned {len(outputs)} outputs for {len(batch)} prompts."
                     )
                 accepted_batch: list[dict[str, Any]] = []
@@ -225,7 +222,7 @@ def generate_mt_negatives(
     for split, pairs in split_pairs.items():
         references = _read_jsonl(output_root / f"{split}.reference.jsonl")
         if len(references) != len(pairs):
-            raise NegativeGenerationError(f"Reference/pair count mismatch for {dataset_key}/{split}.")
+            raise PipelineError(f"Reference/pair count mismatch for {dataset_key}/{split}.")
         combined: list[dict[str, Any]] = []
         negatives: list[dict[str, Any]] = []
         for position, (pair, reference) in enumerate(zip(pairs, references), start=1):
@@ -254,7 +251,9 @@ def generate_mt_negatives(
         negative_path = output_root / f"{split}.mt.jsonl"
         combined_path = output_root / f"{split}.jsonl"
         if not force and (negative_path.exists() or combined_path.exists()):
-            raise FileExistsError(f"Classifier MT data already exists: {negative_path} or {combined_path}")
+            raise FileExistsError(
+                f"Classifier MT data already exists: {negative_path} or {combined_path}"
+            )
         save_jsonl(negatives, negative_path)
         save_jsonl(combined, combined_path)
         paths[f"{split}_mt"] = str(negative_path)
@@ -270,7 +269,9 @@ def generate_mt_negatives(
             "model_example_counts": dict(model_counts),
             "rejected_outputs": dict(rejection_counts),
             "resumed_accepted_outputs": resumed_count,
-            "requested_pairs_by_split": {split: len(records) for split, records in split_pairs.items()},
+            "requested_pairs_by_split": {
+                split: len(records) for split, records in split_pairs.items()
+            },
             "accepted_pairs_by_split": accepted_by_split,
             "dropped_pairs_by_split": dropped_by_split,
             "balanced_examples_by_split": {
@@ -285,10 +286,14 @@ def generate_mt_negatives(
 
 
 def build_arg_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="Generate mixed-model P0 MT negatives for classifier data.")
+    parser = argparse.ArgumentParser(
+        description="Generate mixed-model P0 MT negatives for classifier data."
+    )
     parser.add_argument("--dataset", required=True, choices=("en_eu", "en_ca"))
     parser.add_argument("--splits", default="train,dev,test")
-    parser.add_argument("--model-keys", default=None, help="Comma-separated override for the P0 mixture.")
+    parser.add_argument(
+        "--model-keys", default=None, help="Comma-separated override for the P0 mixture."
+    )
     parser.add_argument("--datasets-config", default="configs/datasets.yaml")
     parser.add_argument("--experiments-config", default="configs/experiments.yaml")
     parser.add_argument("--generation-config", default="configs/generation.yaml")
@@ -300,7 +305,9 @@ def build_arg_parser() -> argparse.ArgumentParser:
 
 def main() -> None:
     args = build_arg_parser().parse_args()
-    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
+    logging.basicConfig(
+        level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s"
+    )
     model_keys = args.model_keys.split(",") if args.model_keys else None
     paths = generate_mt_negatives(
         dataset_key=args.dataset,

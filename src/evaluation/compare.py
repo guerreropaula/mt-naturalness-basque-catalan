@@ -1,4 +1,4 @@
-"""Build clean, language-level P0-P5 comparison CSVs."""
+"""Build one P0-P5 comparison CSV per language."""
 
 from __future__ import annotations
 
@@ -192,7 +192,7 @@ def _interpretation(metric_key: str) -> str:
 
 
 def _comparison_metric_key(metric_key: str) -> tuple[str, str]:
-    """Map reference/prediction metric pairs onto one comparison-table row."""
+    """Map reference and prediction values to the same metric row."""
     section, separator, leaf = metric_key.rpartition(".")
     if section.startswith(_REFERENCE_PREFIX):
         return (f"{section.removeprefix(_REFERENCE_PREFIX)}{separator}{leaf}", "reference")
@@ -209,7 +209,6 @@ def _metric_labels(metric_key: str) -> tuple[str, str]:
 
 
 def _discover_models(results_root: Path, dataset: str) -> tuple[str, ...]:
-    """Return models with at least one completed P0-P5 metric summary."""
     models: set[str] = set()
     for _, (experiment, ablation) in _EXPERIMENTS.items():
         if experiment in {"p0", "p1", "p2", "p3"}:
@@ -230,7 +229,6 @@ def _is_planned_experiment(
     model: str,
     experiment_label: str,
 ) -> bool:
-    """Return whether a missing result is part of the planned experiment matrix."""
     if split == "test":
         if experiment_label == "P0":
             return True
@@ -250,9 +248,15 @@ def _is_planned_experiment(
     if split in {"news_test", "literary_test"}:
         return model in _POST_TRAINING_MODELS and experiment_label in _FINAL_TEST_LABELS
 
-    if split in {"literary_5sent_test", "literary_5sent_boundary_test", "literary_5sent_boundary_v2_test"}:
+    if split in {
+        "literary_5sent_test",
+        "literary_5sent_boundary_test",
+        "literary_5sent_boundary_v2_test",
+    }:
         return model == "latxa_8b_instruct" and experiment_label in {
-            "P5 GRPO A2", "P5 GRPO A3v2", "P5 GRPO A3v5"
+            "P5 GRPO A2",
+            "P5 GRPO A3v2",
+            "P5 GRPO A3v5",
         }
 
     return False
@@ -274,12 +278,7 @@ def build_comparison_eval(
     split: str = "test",
     output_dir: str | Path = "results/comparisons",
 ) -> tuple[Path, ...]:
-    """Write one clean P0-P5 comparison CSV per language.
-
-    Each report is metric-first: rows are metrics and every applicable
-    model/experiment pair is a value column. Planned but unfinished conditions
-    stay blank, while empty conditions outside the experiment design are omitted.
-    """
+    """Write one metric-by-condition comparison CSV per language."""
     root = Path(results_root)
     destination_dir = Path(output_dir)
     outputs: list[Path] = []
@@ -301,14 +300,11 @@ def build_comparison_eval(
                         continue
                     comparison_key, score_role = _comparison_metric_key(metric_key)
                     if score_role == "reference":
-                        # The reference set is fixed within a language/split, so a
-                        # single shared value is enough for every model/experiment.
+                        # The reference set is shared by every condition for a language and split.
                         reference_metrics.setdefault(comparison_key, value)
                     else:
                         translation_metrics[comparison_key] = value
-                # Completed exploratory runs are retained. If no metrics exist,
-                # keep the column only when the condition belongs to the planned
-                # matrix, where an empty cell communicates that work is pending.
+                # Keep planned conditions visible when their metrics are still pending.
                 if translation_metrics or _is_planned_experiment(
                     dataset, split, model, experiment_label
                 ):
@@ -325,8 +321,7 @@ def build_comparison_eval(
                 "Metric group": group,
                 "Metric": metric,
                 "Direction": _interpretation(metric_key),
-                # Adequacy and ASTrED are direct translation-versus-reference
-                # metrics, so they have no meaningful independent reference score.
+                # These metrics already compare two texts, so no separate reference score applies.
                 "Reference score": reference_metrics.get(metric_key),
             }
             for column, metrics in translation_metrics_by_column.items():
@@ -341,9 +336,7 @@ def build_comparison_eval(
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(
-        description="Build one clean P0-P5 comparison CSV per language."
-    )
+    parser = argparse.ArgumentParser(description="Build one P0-P5 comparison CSV per language.")
     parser.add_argument("--results-root", type=Path, default=Path("results"))
     parser.add_argument("--datasets", nargs="+", default=["en_ca", "en_eu"])
     parser.add_argument("--models", nargs="+", default=None)

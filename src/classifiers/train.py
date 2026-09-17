@@ -1,4 +1,4 @@
-"""Train and evaluate target-side reference-likeness / translationese classifiers."""
+"""Train and evaluate target-side HT-versus-MT classifiers."""
 
 from __future__ import annotations
 
@@ -13,20 +13,28 @@ from typing import Any
 import numpy as np
 import pandas as pd
 import torch
-from sklearn.metrics import accuracy_score, confusion_matrix, f1_score, precision_score, recall_score, roc_auc_score
+from sklearn.metrics import (
+    accuracy_score,
+    confusion_matrix,
+    f1_score,
+    precision_score,
+    recall_score,
+    roc_auc_score,
+)
 from torch.optim import AdamW
 from torch.utils.data import DataLoader, Dataset
-from transformers import AutoModelForSequenceClassification, AutoTokenizer, get_linear_schedule_with_warmup
+from transformers import (
+    AutoModelForSequenceClassification,
+    AutoTokenizer,
+    get_linear_schedule_with_warmup,
+)
 
 from src.utils.config import load_classifier_config
+from src.utils.errors import PipelineError
 from src.utils.hf_auth import get_hf_token
-from src.utils.io import save_json, save_dataframe_csv
+from src.utils.io import save_dataframe_csv, save_json
 
 logger = logging.getLogger(__name__)
-
-
-class ClassifierTrainingError(RuntimeError):
-    """Raised when classifier training data or runtime configuration is invalid."""
 
 
 @dataclass(frozen=True)
@@ -52,19 +60,21 @@ class SplitMetrics:
 
 
 class TargetTextDataset(Dataset[dict[str, Any]]):
-    """Dataset deliberately restricted to target text and binary label."""
+    """Target texts with binary labels: 1 for human and 0 for machine translation."""
 
     def __init__(self, records: list[dict[str, Any]]) -> None:
         if not records:
-            raise ClassifierTrainingError("Classifier split is empty.")
+            raise PipelineError("Classifier split is empty.")
         required = {"text", "label"}
         missing = required - set(records[0])
         if missing:
-            raise ClassifierTrainingError(f"Classifier examples are missing fields: {sorted(missing)}")
+            raise PipelineError(f"Classifier examples are missing fields: {sorted(missing)}")
         labels = [int(record["label"]) for record in records]
         if set(labels) != {0, 1}:
-            raise ClassifierTrainingError("Each classifier split must contain both label 0 and label 1.")
-        self._records = [{"text": str(record["text"]), "label": int(record["label"])} for record in records]
+            raise PipelineError("Each classifier split must contain both label 0 and label 1.")
+        self._records = [
+            {"text": str(record["text"]), "label": int(record["label"])} for record in records
+        ]
 
     def __len__(self) -> int:
         return len(self._records)
@@ -151,7 +161,7 @@ def _load_optional_json(path: Path) -> dict[str, Any] | None:
     with path.open(encoding="utf-8") as handle:
         value = json.load(handle)
     if not isinstance(value, dict):
-        raise ClassifierTrainingError(f"Expected {path} to contain a JSON object.")
+        raise PipelineError(f"Expected {path} to contain a JSON object.")
     return value
 
 
@@ -163,10 +173,10 @@ def train_classifier(
     results_dir: str | Path | None = None,
     device_name: str | None = None,
 ) -> dict[str, str]:
-    """Train a target-text-only binary reference-likeness / translationese classifier."""
+    """Train one target-side HT-versus-MT classifier."""
     config = load_classifier_config(classifier_config_path)["classifier"]
     if dataset_key not in config["backbones"]:
-        raise ClassifierTrainingError(f"No classifier backbone configured for {dataset_key}.")
+        raise PipelineError(f"No classifier backbone configured for {dataset_key}.")
     train_config = config["training"]
     seed = int(train_config["seed"])
     _set_seed(seed)
@@ -175,7 +185,9 @@ def train_classifier(
     output_root = Path(results_dir or config["results_dir"]) / dataset_key / run_name
     output_root.mkdir(parents=True, exist_ok=True)
     source_pairs_root = Path(config["source_pairs_dir"]) / dataset_key
-    records = {split: _load_jsonl(data_root / f"{split}.jsonl") for split in ("train", "dev", "test")}
+    records = {
+        split: _load_jsonl(data_root / f"{split}.jsonl") for split in ("train", "dev", "test")
+    }
     datasets = {split: TargetTextDataset(value) for split, value in records.items()}
     backbone = str(config["backbones"][dataset_key])
     token = get_hf_token()
@@ -185,15 +197,31 @@ def train_classifier(
     model.to(device)
 
     train_loader = _make_loader(
-        datasets["train"], tokenizer, int(train_config["batch_size"]), int(train_config["max_length"]), True
+        datasets["train"],
+        tokenizer,
+        int(train_config["batch_size"]),
+        int(train_config["max_length"]),
+        True,
     )
     dev_loader = _make_loader(
-        datasets["dev"], tokenizer, int(train_config["eval_batch_size"]), int(train_config["max_length"]), False
+        datasets["dev"],
+        tokenizer,
+        int(train_config["eval_batch_size"]),
+        int(train_config["max_length"]),
+        False,
     )
     test_loader = _make_loader(
-        datasets["test"], tokenizer, int(train_config["eval_batch_size"]), int(train_config["max_length"]), False
+        datasets["test"],
+        tokenizer,
+        int(train_config["eval_batch_size"]),
+        int(train_config["max_length"]),
+        False,
     )
-    optimizer = AdamW(model.parameters(), lr=float(train_config["learning_rate"]), weight_decay=float(train_config["weight_decay"]))
+    optimizer = AdamW(
+        model.parameters(),
+        lr=float(train_config["learning_rate"]),
+        weight_decay=float(train_config["weight_decay"]),
+    )
     total_steps = len(train_loader) * int(train_config["epochs"])
     scheduler = get_linear_schedule_with_warmup(
         optimizer,
@@ -218,15 +246,21 @@ def train_classifier(
             total_loss += float(output.loss.detach().cpu())
         dev_metrics = evaluate_classifier(model, dev_loader, device)
         epoch_metrics.append(
-            {"epoch": epoch, "mean_train_loss": total_loss / max(len(train_loader), 1), "dev": dev_metrics.as_dict()}
+            {
+                "epoch": epoch,
+                "mean_train_loss": total_loss / max(len(train_loader), 1),
+                "dev": dev_metrics.as_dict(),
+            }
         )
         logger.info("%s epoch %d dev F1 %.4f", dataset_key, epoch, dev_metrics.f1)
         if dev_metrics.f1 > best_dev_f1:
             best_dev_f1 = dev_metrics.f1
-            best_state = {name: value.detach().cpu().clone() for name, value in model.state_dict().items()}
+            best_state = {
+                name: value.detach().cpu().clone() for name, value in model.state_dict().items()
+            }
 
     if best_state is None:  # pragma: no cover - train loader cannot be empty after validation
-        raise ClassifierTrainingError("No classifier checkpoint was produced.")
+        raise PipelineError("No classifier checkpoint was produced.")
     model.load_state_dict(best_state)
     model.to(device)
     dev_metrics = evaluate_classifier(model, dev_loader, device)
@@ -273,7 +307,9 @@ def build_arg_parser() -> argparse.ArgumentParser:
 
 def main() -> None:
     args = build_arg_parser().parse_args()
-    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
+    logging.basicConfig(
+        level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s"
+    )
     paths = train_classifier(
         dataset_key=args.dataset,
         classifier_config_path=args.classifier_config,
